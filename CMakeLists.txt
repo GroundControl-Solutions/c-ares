@@ -1,5 +1,12 @@
 CMAKE_MINIMUM_REQUIRED (VERSION 2.8.12)
 
+if(POLICY CMP0042)
+	cmake_policy(SET CMP0042 NEW)
+endif()
+if(POLICY CMP0068)
+	cmake_policy(SET CMP0068 NEW)
+endif()
+
 # Fix for CMake policy warning when building with CMake >= 3.0.
 # TODO: remove this fix once minimum version is updated to 3.0 or newer.
 IF (NOT CMAKE_VERSION VERSION_LESS 3.0)
