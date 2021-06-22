@@ -1,46 +1,69 @@
-c-ares version 1.12.0
+c-ares version 1.17.1
+
+Due to a packaging issue with 1.17.0, we have released 1.17.1 to address that
+issue.  See 1.17.0 release notes below..
+
+
+c-ares version 1.17.0
+
+Security:
+ o avoid read-heap-buffer-overflow in ares_parse_soa_reply found during
+   fuzzing [2] [3]
+ o Avoid theoretical buffer overflow in RC4 loop comparison [5]
+ o Empty hquery->name could lead to invalid memory access [15]
+ o ares_parse_{a,aaaa}_reply() could return a larger *naddrttls than was
+   passed in [17]
 
 Changes:
+ o Update help information for adig, acountry, and ahost [4]
+ o Test Suite now uses dynamic system-assigned ports rather than hardcoded
+   ports to prevent failures in containers [10]
+ o Detect remote DNS server does not support EDNS using rules from RFC 6891 [12]
+ o Source tree has been reorganized to use a more modern layout [13]
+ o Allow parsing of CAA Resource Record [14]
 
- o api: add ARES_OPT_NOROTATE optmask value
- 
 Bug fixes:
+ o readaddrinfo bad sizeof() [1]
+ o Test cases should honor HAVE_WRITEV flag, not depend on WIN32 [6]
+ o FQDN with trailing period should be queried first [7]
+ o ares_getaddrinfo() was returning members of the struct as garbage values if
+   unset, and was not honoring ai_socktype and ai_protocol hints. [8] [9]
+ o ares_gethostbyname() with AF_UNSPEC and an ip address would fail [11]
+ o Properly document ares_set_local_ip4() uses host byte order [16]
 
- o CVE-2016-5180: ares_create_query single byte out of buffer write [4]
- o configure: acknowledge --disable-tests [1]
- o man pages: fix typos detected by Lintian
- o test: add missing #includes for dns-proto.cc
- o test: avoid in6addr_* constants
- o test: Build with MinGW on AppVeyor
- o Makefile.m32: add support for extra flags
- o Makefile.m32: add support for CROSSPREFIX
- o configure: check if tests can get built before enabled
- o ares_library_cleanup: reset ares_realloc too
- o ahost.c: add cast to fix C++ compile
- o test: Only pass unused args to GoogleTest
- o build: commonize MSVC version detection
- o msvc_ver.inc: support Visual Studio 2015 Update 1, 2, 3
- o test: for AF_UNSPEC, return CNAME only for AAAA, but valid A record
- o ares_getnameinfo: explicitly clear struct servent before use
- o test: Update fuzzing function prototype
- o init: fix nsort initialization
- o test: add fuzzing check script to tests
- o web: http => https
- o read_tcp_data: remove superfluous NULL check
- o LICENSE.md: add a stand-alone license file
- o SECURITY.md: suggested "security process" for the project
- o ares_init_options: only propagate init failures from options [2]
- o headers: remove checks for and defines of variable sizes
- o test: fix gMock to work with gcc >= 6.x [3]
- 
 Thanks go to these friendly people for their efforts and contributions:
-
-  Alexander Drachevskiy, Brad House, Chris Araman, Daniel Stenberg,
-  David Drysdale, Gregor Jasny, Svante Karlsson, Viktor Szakats
+  @anonymoushelpishere
+  Anthony Penniston (@apenn-msft)
+  Brad House (@bradh352)
+  Bulat Gaifullin (@bgaifullin)
+  Daniela Sonnenschein (@lxdicted)
+  Daniel Stenberg (@bagder)
+  David Hotham (@dimbleby)
+  Fionn Fitzmaurice (@fionn)
+  Gisle Vanem (@gavenm)
+  Ivan Baidakou (@basiliscos)
+  Jonathan Maye-Hobbs (@wheelpharoah)
+  Łukasz Marszał (@lmarszal)
+  lutianxiong (@ltx2018)
+  Seraphime Kirkovski (@Seraphime)
+(14 contributors)
 
 References to bug reports and discussions on issues:
+ [1] = https://github.com/c-ares/c-ares/pull/331
+ [2] = https://github.com/c-ares/c-ares/pull/332
+ [3] = https://github.com/c-ares/c-ares/issues/333
+ [4] = https://github.com/c-ares/c-ares/pull/334
+ [5] = https://github.com/c-ares/c-ares/pull/336
+ [6] = https://github.com/c-ares/c-ares/pull/344
+ [7] = https://github.com/c-ares/c-ares/pull/345
+ [8] = https://github.com/c-ares/c-ares/issues/343
+ [9] = https://github.com/c-ares/c-ares/issues/317
+ [10] = https://github.com/c-ares/c-ares/pull/346
+ [11] = https://github.com/c-ares/c-ares/pull/204
+ [12] = https://github.com/c-ares/c-ares/pull/244
+ [13] = https://github.com/c-ares/c-ares/pull/349
+ [14] = https://github.com/c-ares/c-ares/pull/360
+ [15] = https://github.com/c-ares/c-ares/pull/367
+ [16] = https://github.com/c-ares/c-ares/pull/368
+ [17] = https://github.com/c-ares/c-ares/issues/371
 
- [1] = https://github.com/c-ares/c-ares/issues/44
- [2] = https://github.com/c-ares/c-ares/issues/60
- [3] = https://github.com/google/googletest/issues/705#issuecomment-235067917
- [4] = https://c-ares.haxx.se/adv_20160929.html

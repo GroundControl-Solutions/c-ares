@@ -42,5 +42,14 @@ int LLVMFuzzerTestOneInput(const unsigned char *data,
   struct ares_soa_reply* soa = NULL;
   ares_parse_soa_reply(data, size, &soa);
   if (soa) ares_free_data(soa);
+
+  struct ares_naptr_reply* naptr = NULL;
+  ares_parse_naptr_reply(data, size, &naptr);
+  if (naptr) ares_free_data(naptr);
+
+  struct ares_caa_reply* caa = NULL;
+  ares_parse_caa_reply(data, size, &caa);
+  if (caa) ares_free_data(caa);
+
   return 0;
 }

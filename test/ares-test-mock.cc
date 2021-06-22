@@ -51,7 +51,7 @@ TEST_P(MockChannelTest, Basic) {
 }
 
 // UDP only so mock server doesn't get confused by concatenated requests
-TEST_P(MockUDPChannelTest, ParallelLookups) {
+TEST_P(MockUDPChannelTest, GetHostByNameParallelLookups) {
   DNSPacket rsp1;
   rsp1.set_response().set_aa()
     .add_question(new DNSQuestion("www.google.com", ns_t_a))
@@ -395,7 +395,7 @@ class MockEDNSChannelTest : public MockFlagsChannelOptsTest {
 
 TEST_P(MockEDNSChannelTest, RetryWithoutEDNS) {
   DNSPacket rspfail;
-  rspfail.set_response().set_aa().set_rcode(ns_r_servfail)
+  rspfail.set_response().set_aa().set_rcode(ns_r_formerr)
     .add_question(new DNSQuestion("www.google.com", ns_t_a));
   DNSPacket rspok;
   rspok.set_response()
@@ -883,6 +883,18 @@ TEST_P(MockChannelTest, CancelImmediate) {
   EXPECT_EQ(0, result.timeouts_);
 }
 
+TEST_P(MockChannelTest, CancelImmediateGetHostByAddr) {
+  HostResult result;
+  struct in_addr addr;
+  addr.s_addr = htonl(0x08080808);
+  
+  ares_gethostbyaddr(channel_, &addr, sizeof(addr), AF_INET, HostCallback, &result);
+  ares_cancel(channel_);
+  EXPECT_TRUE(result.done_);
+  EXPECT_EQ(ARES_ECANCELLED, result.status_);
+  EXPECT_EQ(0, result.timeouts_);
+}
+
 // Relies on retries so is UDP-only
 TEST_P(MockUDPChannelTest, CancelLater) {
   std::vector<byte> nothing;
@@ -922,6 +934,21 @@ TEST_P(MockChannelTest, GetHostByNameDestroyRelative) {
   EXPECT_TRUE(result.done_);  // Synchronous
   EXPECT_EQ(ARES_EDESTRUCTION, result.status_);
   EXPECT_EQ(0, result.timeouts_);
+}
+
+TEST_P(MockChannelTest, GetHostByNameCNAMENoData) {
+  DNSPacket response;
+  response.set_response().set_aa()
+    .add_question(new DNSQuestion("cname.first.com", ns_t_a))
+    .add_answer(new DNSCnameRR("cname.first.com", 100, "a.first.com"));
+  ON_CALL(server_, OnRequest("cname.first.com", ns_t_a))
+    .WillByDefault(SetReply(&server_, &response));
+
+  HostResult result;
+  ares_gethostbyname(channel_, "cname.first.com", AF_INET, HostCallback, &result);
+  Process();
+  EXPECT_TRUE(result.done_);
+  EXPECT_EQ(ARES_ENODATA, result.status_);
 }
 
 TEST_P(MockChannelTest, GetHostByAddrDestroy) {
@@ -1013,7 +1040,7 @@ class MockMultiServerChannelTest
     public ::testing::WithParamInterface< std::pair<int, bool> > {
  public:
   MockMultiServerChannelTest(bool rotate)
-    : MockChannelOptsTest(3, GetParam().first, GetParam().second, nullptr, rotate ? ARES_OPT_ROTATE : 0) {}
+    : MockChannelOptsTest(3, GetParam().first, GetParam().second, nullptr, rotate ? ARES_OPT_ROTATE : ARES_OPT_NOROTATE) {}
   void CheckExample() {
     HostResult result;
     ares_gethostbyname(channel_, "www.example.com.", AF_INET, HostCallback, &result);
@@ -1037,6 +1064,12 @@ class NoRotateMultiMockTest : public MockMultiServerChannelTest {
 
 
 TEST_P(RotateMultiMockTest, ThirdServer) {
+  struct ares_options opts = {0};
+  int optmask = 0;
+  EXPECT_EQ(ARES_SUCCESS, ares_save_options(channel_, &opts, &optmask));
+  EXPECT_EQ(0, (optmask & ARES_OPT_NOROTATE));
+  ares_destroy_options(&opts);
+
   DNSPacket servfailrsp;
   servfailrsp.set_response().set_aa().set_rcode(ns_r_servfail)
     .add_question(new DNSQuestion("www.example.com", ns_t_a));
@@ -1076,6 +1109,12 @@ TEST_P(RotateMultiMockTest, ThirdServer) {
 }
 
 TEST_P(NoRotateMultiMockTest, ThirdServer) {
+  struct ares_options opts = {0};
+  int optmask = 0;
+  EXPECT_EQ(ARES_SUCCESS, ares_save_options(channel_, &opts, &optmask));
+  EXPECT_EQ(ARES_OPT_NOROTATE, (optmask & ARES_OPT_NOROTATE));
+  ares_destroy_options(&opts);
+
   DNSPacket servfailrsp;
   servfailrsp.set_response().set_aa().set_rcode(ns_r_servfail)
     .add_question(new DNSQuestion("www.example.com", ns_t_a));
@@ -1114,48 +1153,21 @@ TEST_P(NoRotateMultiMockTest, ThirdServer) {
   CheckExample();
 }
 
+INSTANTIATE_TEST_CASE_P(AddressFamilies, MockChannelTest, ::testing::ValuesIn(ares::test::families_modes));
 
-INSTANTIATE_TEST_CASE_P(AddressFamilies, MockChannelTest,
-                        ::testing::Values(std::make_pair<int, bool>(AF_INET, false),
-                                          std::make_pair<int, bool>(AF_INET, true),
-                                          std::make_pair<int, bool>(AF_INET6, false),
-                                          std::make_pair<int, bool>(AF_INET6, true)));
+INSTANTIATE_TEST_CASE_P(AddressFamilies, MockUDPChannelTest, ::testing::ValuesIn(ares::test::families));
 
-INSTANTIATE_TEST_CASE_P(AddressFamilies, MockUDPChannelTest,
-                        ::testing::Values(AF_INET, AF_INET6));
+INSTANTIATE_TEST_CASE_P(AddressFamilies, MockTCPChannelTest, ::testing::ValuesIn(ares::test::families));
 
-INSTANTIATE_TEST_CASE_P(AddressFamilies, MockTCPChannelTest,
-                        ::testing::Values(AF_INET, AF_INET6));
+INSTANTIATE_TEST_CASE_P(AddressFamilies, MockExtraOptsTest, ::testing::ValuesIn(ares::test::families_modes));
 
-INSTANTIATE_TEST_CASE_P(AddressFamilies, MockExtraOptsTest,
-                        ::testing::Values(std::make_pair<int, bool>(AF_INET, false),
-                                          std::make_pair<int, bool>(AF_INET, true),
-                                          std::make_pair<int, bool>(AF_INET6, false),
-                                          std::make_pair<int, bool>(AF_INET6, true)));
+INSTANTIATE_TEST_CASE_P(AddressFamilies, MockNoCheckRespChannelTest, ::testing::ValuesIn(ares::test::families_modes));
 
-INSTANTIATE_TEST_CASE_P(AddressFamilies, MockNoCheckRespChannelTest,
-                        ::testing::Values(std::make_pair<int, bool>(AF_INET, false),
-                                          std::make_pair<int, bool>(AF_INET, true),
-                                          std::make_pair<int, bool>(AF_INET6, false),
-                                          std::make_pair<int, bool>(AF_INET6, true)));
+INSTANTIATE_TEST_CASE_P(AddressFamilies, MockEDNSChannelTest, ::testing::ValuesIn(ares::test::families_modes));
 
-INSTANTIATE_TEST_CASE_P(AddressFamilies, MockEDNSChannelTest,
-                        ::testing::Values(std::make_pair<int, bool>(AF_INET, false),
-                                          std::make_pair<int, bool>(AF_INET, true),
-                                          std::make_pair<int, bool>(AF_INET6, false),
-                                          std::make_pair<int, bool>(AF_INET6, true)));
+INSTANTIATE_TEST_CASE_P(TransportModes, RotateMultiMockTest, ::testing::ValuesIn(ares::test::families_modes));
 
-INSTANTIATE_TEST_CASE_P(TransportModes, RotateMultiMockTest,
-                        ::testing::Values(std::make_pair<int, bool>(AF_INET, false),
-                                          std::make_pair<int, bool>(AF_INET, true),
-                                          std::make_pair<int, bool>(AF_INET6, false),
-                                          std::make_pair<int, bool>(AF_INET6, true)));
-
-INSTANTIATE_TEST_CASE_P(TransportModes, NoRotateMultiMockTest,
-                        ::testing::Values(std::make_pair<int, bool>(AF_INET, false),
-                                          std::make_pair<int, bool>(AF_INET, true),
-                                          std::make_pair<int, bool>(AF_INET6, false),
-                                          std::make_pair<int, bool>(AF_INET6, true)));
+INSTANTIATE_TEST_CASE_P(TransportModes, NoRotateMultiMockTest, ::testing::ValuesIn(ares::test::families_modes));
 
 }  // namespace test
 }  // namespace ares
