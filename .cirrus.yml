@@ -1,6 +1,10 @@
+# Copyright (C) The c-ares project and its contributors
+# SPDX-License-Identifier: MIT
+
 env:
   CIRRUS_CLONE_DEPTH: 1
-  CMAKE_FLAGS: "-DCMAKE_BUILD_TYPE=DEBUG -DCARES_STATIC=ON -DCARES_STATIC_PIC=ON -DCARES_BUILD_TESTS=ON"
+  CMAKE_FLAGS: "-DCMAKE_BUILD_TYPE=DEBUG -DCARES_STATIC=ON -DCARES_STATIC_PIC=ON -G Ninja"
+  CMAKE_TEST_FLAGS: "-DCARES_BUILD_TESTS=ON"
 
 task:
   matrix:
@@ -12,12 +16,32 @@ task:
         MAKE: "make"
         BUILD_ASAN: "yes"
         BUILD_UBSAN: "yes"
-        BUILD_LSAN: "yes"
         BUILD_VALGRIND: "yes"
         BUILD_COVERAGE: "yes"
         BUILD_ANALYZE: "yes"
+        TEST_SYMBOL_VISIBILITY: "yes"
       container:
         image: debian:latest
+    - name: "Alpine amd64"
+      env:
+        DIST: "ALPINE"
+        LC_ALL: "C"
+        SCAN_BUILD: "scan-build"
+        MAKE: "make"
+        BUILD_ASAN: "yes"
+        BUILD_UBSAN: "yes"
+        BUILD_VALGRIND: "yes"
+        BUILD_ANALYZE: "yes"
+        TEST_SYMBOL_VISIBILITY: "yes"
+      container:
+        image: alpine:latest
+    - name: "Ubuntu OLD amd64"
+      env:
+        DIST: "UBUNTU"
+        LC_ALL: "C"
+        MAKE: "make"
+      container:
+        image: ubuntu:20.04
     - name: "Debian arm64"
       env:
         DIST: "DEBIAN-ARM"
@@ -26,7 +50,6 @@ task:
         MAKE: "make"
         BUILD_ASAN: "yes"
         BUILD_UBSAN: "yes"
-        BUILD_LSAN: "yes"
         BUILD_ANALYZE: "yes"
       arm_container:
         image: debian:latest
@@ -36,34 +59,48 @@ task:
         SCAN_BUILD: "scan-build"
         MAKE: "gmake"
         BUILD_ANALYZE: "yes"
+        TEST_SYMBOL_VISIBILITY: "yes"
       freebsd_instance:
-        image_family: freebsd-13-0
+        image_family: freebsd-13-2
     - name: "MacOS"
       env:
         DIST: "MACOS"
-        SCAN_BUILD: "/usr/local/opt/llvm/bin/scan-build"
+        SCAN_BUILD: "/opt/homebrew/opt/llvm/bin/scan-build-py"
         MAKE: "make"
         BUILD_ASAN: "yes"
         BUILD_ANALYZE: "yes"
+        TEST_SYMBOL_VISIBILITY: "yes"
       macos_instance:
-        image: big-sur-xcode
+        image: ghcr.io/cirruslabs/macos-ventura-xcode:latest
     - name: "iOS"
       env:
         DIST: "iOS"
         MAKE: "make"
-        CMAKE_FLAGS: "-DCMAKE_BUILD_TYPE=DEBUG -DCARES_STATIC=ON -DCARES_STATIC_PIC=ON -DCARES_BUILD_TESTS=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=10.0 -DCMAKE_OSX_ARCHITECTURES=armv7;armv7s;arm64"
+        CMAKE_FLAGS: "-DCMAKE_BUILD_TYPE=DEBUG -DCARES_STATIC=ON -DCARES_STATIC_PIC=ON -DCMAKE_OSX_DEPLOYMENT_TARGET=10.0 -DCMAKE_OSX_ARCHITECTURES=armv7;armv7s;arm64 -G Ninja"
+        CMAKE_TEST_FLAGS: "-DCARES_BUILD_TESTS=OFF"
         CFLAGS: "-arch armv7 -arch armv7s -arch arm64 -miphoneos-version-min=10.0"
         CONFIG_OPTS: "--host=arm-apple-darwin10 --disable-tests"
       macos_instance:
-        image: big-sur-xcode
+        image: ghcr.io/cirruslabs/macos-ventura-xcode:latest
   matrix:
     - name: "CMAKE"
       env:
         BUILD_TYPE: "cmake"
+    - name: "CMAKE no threads"
+      only_if: $DIST == 'DEBIAN'
+      env:
+        BUILD_TYPE: "cmake"
+        CMAKE_FLAGS: "-DCMAKE_BUILD_TYPE=DEBUG -DCARES_STATIC=ON -DCARES_STATIC_PIC=ON -DCARES_THREADS=OFF -G Ninja"
+    - name: "CMAKE HIDE SYMBOLS"
+      only_if: $TEST_SYMBOL_VISIBILITY == 'yes'
+      env:
+        BUILD_TYPE: "cmake"
+        CMAKE_FLAGS: "-DCMAKE_BUILD_TYPE=DEBUG -DCARES_STATIC=OFF -DCARES_SYMBOL_HIDING=ON -G Ninja"
     - name: "AUTOTOOLS"
       env:
         BUILD_TYPE: "autotools"
     - name: "ASAN"
+      # ASAN on Linux automatically includes Leak Sanitizer
       # FreeBSD just hangs trying to run tests, think it may be trying to run leak sanitizer
       only_if: $BUILD_ASAN == 'yes'
       env:
@@ -72,7 +109,7 @@ task:
         CONFIG_OPTS: "--enable-debug"
         CFLAGS: "-fsanitize=address"
         CXXFLAGS: "-fsanitize=address"
-        LDFLAGS: "-fsanitize=address -lpthread"
+        LDFLAGS: "-fsanitize=address"
     - name: "UBSAN"
       # FreeBSD just hangs trying to run tests, think it may be trying to run leak sanitizer
       only_if: $BUILD_UBSAN == 'yes'
@@ -82,17 +119,7 @@ task:
         CONFIG_OPTS: "--enable-debug"
         CFLAGS: "-fsanitize=undefined -fno-sanitize-recover"
         CXXFLAGS: "-fsanitize=undefined -fno-sanitize-recover"
-        LDFLAGS: "-fsanitize=undefined -lpthread"
-    - name: "LSAN"
-      # lsan only works on debian x86/x64
-      only_if: $BUILD_LSAN == 'yes'
-      env:
-        BUILD_TYPE: "lsan"
-        CC: "clang"
-        CONFIG_OPTS: "--enable-debug"
-        CFLAGS: "-fsanitize=leak"
-        CXXFLAGS: "-fsanitize=leak"
-        LDFLAGS: "-fsanitize=leak -lpthread"
+        LDFLAGS: "-fsanitize=undefined"
     - name: "ANALYZE"
       only_if: $BUILD_ANALYZE == 'yes'
       env:
@@ -100,6 +127,7 @@ task:
         CC: "clang"
         SCAN_WRAP: "${SCAN_BUILD} -v --status-bugs"
         CONFIG_OPTS: "--enable-debug --disable-tests"
+        CMAKE_TEST_FLAGS: "-DCARES_BUILD_TESTS=OFF"
     - name: "VALGRIND"
       # FreeBSD just hangs trying to run tests, think it may be trying to run leak sanitizer
       only_if: $BUILD_VALGRIND == 'yes'
@@ -122,28 +150,46 @@ task:
   install_script:
     - |
       case "${DIST}" in
-        DEBIAN*)
-          apt-get update && \
-          apt-get install -y cmake ninja-build autoconf automake libtool g++ pip
+        ALPINE)
+          apk add cmake samurai gtest-dev autoconf autoconf-archive automake libtool pkgconf make
           case "${BUILD_TYPE}" in
             asan|lsan|ubsan)
-              apt-get install -y clang
+              apk add clang17 compiler-rt
               ;;
             analyze)
-              apt-get install -y clang clang-tools
+              apk add clang17 clang17-analyzer compiler-rt
               ;;
             valgrind)
-              apt-get install -y valgrind
+              apk add gcc g++ valgrind
+              ;;
+            *)
+              apk add gcc g++
+              ;;
+          esac
+          ;;
+        UBUNTU|DEBIAN*)
+          export DEBIAN_FRONTEND=noninteractive && \
+          apt-get update && \
+          apt-get install -y cmake ninja-build autoconf automake libtool g++ libgmock-dev pkg-config
+          case "${BUILD_TYPE}" in
+            asan|lsan|ubsan)
+              apt-get install -yq clang
+              ;;
+            analyze)
+              apt-get install -yq clang clang-tools
+              ;;
+            valgrind)
+              apt-get install -yq valgrind
               ;;
             coverage)
-              apt-get install -y lcov git
-              pip3 install --user cpp-coveralls
+              apt-get install -yq lcov git pip
+              pip3 install --break-system-packages --user cpp-coveralls
               ;;
           esac
           ;;
         FREEBSD)
           # pkg upgrade -y && \
-          pkg install -y cmake ninja
+          pkg install -y cmake ninja googletest pkgconf
           case "${BUILD_TYPE}" in
             asan|analyze|ubsan|lsan)
               pkg install -y llvm autoconf automake libtool gmake
@@ -155,7 +201,7 @@ task:
           ;;
         MACOS|iOS)
           brew update && \
-          brew install ninja cmake
+          brew install ninja cmake googletest
           case "${BUILD_TYPE}" in
             asan|ubsan|lsan|analyze)
               brew install llvm autoconf automake libtool make
