@@ -53,13 +53,6 @@ TEST(LibraryInit, UnexpectedCleanup) {
   EXPECT_EQ(EXPECTED_NONINIT, ares_library_initialized());
 }
 
-TEST(LibraryInit, DISABLED_InvalidParam) {
-  // TODO: police flags argument to ares_library_init()
-  EXPECT_EQ(ARES_EBADQUERY, ares_library_init(ARES_LIB_INIT_ALL << 2));
-  EXPECT_EQ(EXPECTED_NONINIT, ares_library_initialized());
-  ares_library_cleanup();
-}
-
 TEST(LibraryInit, Nested) {
   EXPECT_EQ(EXPECTED_NONINIT, ares_library_initialized());
   EXPECT_EQ(ARES_SUCCESS, ares_library_init(ARES_LIB_INIT_ALL));
@@ -424,7 +417,8 @@ CONTAINED_TEST_F(LibraryTest, ContainerChannelInit,
 CONTAINED_TEST_F(LibraryTest, ContainerSortlistOptionInit,
                  "myhostname", "mydomainname.org", filelist) {
   ares_channel_t *channel = nullptr;
-  struct ares_options opts = {0};
+  struct ares_options opts;
+  memset(&opts, 0, sizeof(opts));
   int optmask = 0;
   optmask |= ARES_OPT_SORTLIST;
   opts.nsort = 0;
@@ -468,7 +462,8 @@ CONTAINED_TEST_F(LibraryTest, ContainerMyResolvConfInit,
                  "myhostname", "mydomain.org", myresolvconf) {
   char filename[] = "/tmp/myresolv.cnf";
   ares_channel_t *channel = nullptr;
-  struct ares_options options = {0};
+  struct ares_options options;
+  memset(&options, 0, sizeof(options));
   options.resolvconf_path = strdup(filename);
   int optmask = ARES_OPT_RESOLVCONF;
   EXPECT_EQ(ARES_SUCCESS, ares_init_options(&channel, &options, optmask));
@@ -494,11 +489,12 @@ CONTAINED_TEST_F(LibraryTest, ContainerMyHostsInit,
                  "myhostname", "mydomain.org", myhosts) {
   char filename[] = "/tmp/hosts";
   ares_channel_t *channel = nullptr;
-  struct ares_options options = {0};
+  struct ares_options options;
+
   options.hosts_path = strdup(filename);
   int optmask = ARES_OPT_HOSTS_FILE;
   EXPECT_EQ(ARES_SUCCESS, ares_init_options(&channel, &options, optmask));
-
+  memset(&options, 0, sizeof(options));
   optmask = 0;
   free(options.hosts_path);
   options.hosts_path = NULL;
@@ -508,22 +504,6 @@ CONTAINED_TEST_F(LibraryTest, ContainerMyHostsInit,
   EXPECT_EQ(std::string(filename), std::string(options.hosts_path));
 
   ares_destroy_options(&options);
-  ares_destroy(channel);
-  return HasFailure();
-}
-
-NameContentList hostconf = {
-  {"/etc/resolv.conf", "nameserver 1.2.3.4\n"
-                       "sortlist1.2.3.4\n"  // malformed line
-                       "search first.com second.com\n"},
-  {"/etc/host.conf", "order bind hosts\n"}};
-CONTAINED_TEST_F(LibraryTest, ContainerHostConfInit,
-                 "myhostname", "mydomainname.org", hostconf) {
-  ares_channel_t *channel = nullptr;
-  EXPECT_EQ(ARES_SUCCESS, ares_init(&channel));
-
-  EXPECT_EQ(std::string("bf"), std::string(channel->lookups));
-
   ares_destroy(channel);
   return HasFailure();
 }
@@ -589,15 +569,7 @@ CONTAINED_TEST_F(LibraryTest, ContainerNsswitchConfNotReadable,
   ares_destroy(channel);
   return HasFailure();
 }
-CONTAINED_TEST_F(LibraryTest, ContainerHostConfNotReadable,
-                 "myhostname", "mydomainname.org", hostconf) {
-  ares_channel_t *channel = nullptr;
-  // Unavailable /etc/host.conf falls back to defaults.
-  MakeUnreadable hide("/etc/host.conf");
-  EXPECT_EQ(ARES_SUCCESS, ares_init(&channel));
-  ares_destroy(channel);
-  return HasFailure();
-}
+
 CONTAINED_TEST_F(LibraryTest, ContainerSvcConfNotReadable,
                  "myhostname", "mydomainname.org", svcconf) {
   ares_channel_t *channel = nullptr;
@@ -626,7 +598,8 @@ CONTAINED_TEST_F(LibraryTest, ContainerRotateInit,
 CONTAINED_TEST_F(LibraryTest, ContainerRotateOverride,
                  "myhostname", "mydomainname.org", rotateenv) {
   ares_channel_t *channel = nullptr;
-  struct ares_options opts = {0};
+  struct ares_options opts;
+  memset(&opts, 0, sizeof(opts));
   int optmask = ARES_OPT_NOROTATE;
   EXPECT_EQ(ARES_SUCCESS, ares_init_options(&channel, &opts, optmask));
   optmask = 0;
@@ -718,7 +691,8 @@ CONTAINED_TEST_F(LibraryTest, ContainerEmptyInit,
 CONTAINED_TEST_F(LibraryTest, ContainerNoDfltSvrEmptyInit,
                  "myhostname", "mydomainname.org", empty) {
   ares_channel_t *channel = nullptr;
-  struct ares_options opts = {0};
+  struct ares_options opts;
+  memset(&opts, 0, sizeof(opts));
   int optmask = ARES_OPT_FLAGS;
   opts.flags = ARES_FLAG_NO_DFLT_SVR;
   EXPECT_EQ(ARES_ENOSERVER, ares_init_options(&channel, &opts, optmask));
@@ -731,7 +705,8 @@ CONTAINED_TEST_F(LibraryTest, ContainerNoDfltSvrEmptyInit,
 CONTAINED_TEST_F(LibraryTest, ContainerNoDfltSvrFullInit,
                  "myhostname", "mydomainname.org", filelist) {
   ares_channel_t *channel = nullptr;
-  struct ares_options opts = {0};
+  struct ares_options opts;
+  memset(&opts, 0, sizeof(opts));
   int optmask = ARES_OPT_FLAGS;
   opts.flags = ARES_FLAG_NO_DFLT_SVR;
   EXPECT_EQ(ARES_SUCCESS, ares_init_options(&channel, &opts, optmask));

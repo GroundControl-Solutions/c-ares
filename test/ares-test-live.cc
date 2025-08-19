@@ -74,7 +74,7 @@ MATCHER_P(IncludesAddrType, addrtype, "") {
 }
 
 //VIRT_NONVIRT_TEST_F(DefaultChannelTest, LiveGetAddrInfoV4) {
-  //struct ares_addrinfo_hints hints = {};
+  //struct ares_addrinfo_hints hints = {0, 0, 0, 0};
   //hints.ai_family = AF_INET;
   //AddrInfoResult result;
   //ares_getaddrinfo(channel_, "www.google.com.", NULL, &hints, AddrInfoCallback, &result);
@@ -86,7 +86,7 @@ MATCHER_P(IncludesAddrType, addrtype, "") {
 //}
 
 //VIRT_NONVIRT_TEST_F(DefaultChannelTest, LiveGetAddrInfoV6) {
-  //struct ares_addrinfo_hints hints = {};
+  //struct ares_addrinfo_hints hints = {0, 0, 0, 0};
   //hints.ai_family = AF_INET6;
   //AddrInfoResult result;
   //ares_getaddrinfo(channel_, "www.google.com.", NULL, &hints, AddrInfoCallback, &result);
@@ -98,7 +98,7 @@ MATCHER_P(IncludesAddrType, addrtype, "") {
 //}
 
 //VIRT_NONVIRT_TEST_F(DefaultChannelTest, LiveGetAddrInfoUnspec) {
-  //struct ares_addrinfo_hints hints = {};
+  //struct ares_addrinfo_hints hints = {0, 0, 0, 0};
   //hints.ai_family = AF_UNSPEC;
   //AddrInfoResult result;
   //ares_getaddrinfo(channel_, "www.google.com.", NULL, &hints, AddrInfoCallback, &result);
@@ -177,7 +177,7 @@ TEST_P(DefaultChannelModeTest, LiveGetLocalhostByNameV4) {
     EXPECT_EQ(ARES_SUCCESS, result.status_);
     EXPECT_EQ(1, (int)result.host_.addrs_.size());
     EXPECT_EQ(AF_INET, result.host_.addrtype_);
-    EXPECT_NE(std::string::npos, result.host_.name_.find("localhost"));
+    EXPECT_NE(SIZE_MAX, result.host_.name_.find("localhost"));
   }
 }
 
@@ -192,7 +192,7 @@ TEST_P(DefaultChannelModeTest, LiveGetLocalhostByNameV6) {
     EXPECT_EQ(AF_INET6, result.host_.addrtype_);
     std::stringstream ss;
     ss << HostEnt(result.host_);
-    EXPECT_NE(std::string::npos, result.host_.name_.find("localhost"));
+    EXPECT_NE(SIZE_MAX, result.host_.name_.find("localhost"));
   }
 }
 
@@ -205,7 +205,7 @@ TEST_P(DefaultChannelModeTest, LiveGetNonExistLocalhostByNameV4) {
     EXPECT_EQ(ARES_SUCCESS, result.status_);
     EXPECT_EQ(1, (int)result.host_.addrs_.size());
     EXPECT_EQ(AF_INET, result.host_.addrtype_);
-    EXPECT_NE(std::string::npos, result.host_.name_.find("idonotexist.localhost"));
+    EXPECT_NE(SIZE_MAX, result.host_.name_.find("idonotexist.localhost"));
   }
 }
 
@@ -220,7 +220,7 @@ TEST_P(DefaultChannelModeTest, LiveGetNonExistLocalhostByNameV6) {
     EXPECT_EQ(AF_INET6, result.host_.addrtype_);
     std::stringstream ss;
     ss << HostEnt(result.host_);
-    EXPECT_NE(std::string::npos, result.host_.name_.find("idonotexist.localhost"));
+    EXPECT_NE(SIZE_MAX, result.host_.name_.find("idonotexist.localhost"));
   }
 }
 
@@ -272,8 +272,8 @@ TEST_P(DefaultChannelModeTest, LiveGetLocalhostByAddrV4) {
     EXPECT_LT(0, (int)result.host_.addrs_.size());
     EXPECT_EQ(AF_INET, result.host_.addrtype_);
     // oddly, travis does not resolve to localhost, but a random hostname starting with travis-job
-    if (result.host_.name_.find("travis-job") == std::string::npos) {
-        EXPECT_NE(std::string::npos,
+    if (result.host_.name_.find("travis-job") == SIZE_MAX) {
+        EXPECT_NE(SIZE_MAX,
                   result.host_.name_.find("localhost"));
     }
   }
@@ -292,8 +292,8 @@ TEST_P(DefaultChannelModeTest, LiveGetLocalhostByAddrV6) {
     EXPECT_LT(0, (int)result.host_.addrs_.size());
     EXPECT_EQ(AF_INET6, result.host_.addrtype_);
     const std::string& name = result.host_.name_;
-    EXPECT_TRUE(std::string::npos != name.find("localhost") ||
-                std::string::npos != name.find("ip6-loopback"));
+    EXPECT_TRUE(SIZE_MAX != name.find("localhost") ||
+                SIZE_MAX != name.find("ip6-loopback"));
   }
 }
 
@@ -669,115 +669,7 @@ VIRT_NONVIRT_TEST_F(DefaultChannelTest, LiveGetNameInfoAllocFail) {
   EXPECT_EQ(ARES_ENOMEM, result.status_);
 }
 
-VIRT_NONVIRT_TEST_F(DefaultChannelTest, GetSock) {
-  ares_socket_t socks[3] = {ARES_SOCKET_BAD, ARES_SOCKET_BAD, ARES_SOCKET_BAD};
-  int bitmask = ares_getsock(channel_, socks, 3);
-  EXPECT_EQ(0, bitmask);
-  bitmask = ares_getsock(channel_, nullptr, 0);
-  EXPECT_EQ(0, bitmask);
 
-  // Ask again with a pending query.
-  HostResult result;
-  ares_gethostbyname(channel_, "www.google.com.", AF_INET, HostCallback, &result);
-  bitmask = ares_getsock(channel_, socks, 3);
-  EXPECT_NE(0, bitmask);
-
-  size_t sock_cnt = 0;
-  for (size_t i=0; i<3; i++) {
-    if (ARES_GETSOCK_READABLE(bitmask, i) || ARES_GETSOCK_WRITABLE(bitmask, i)) {
-      EXPECT_NE(ARES_SOCKET_BAD, socks[i]);
-      if (socks[i] != ARES_SOCKET_BAD)
-        sock_cnt++;
-    }
-  }
-  EXPECT_NE((size_t)0, sock_cnt);
-
-  bitmask = ares_getsock(channel_, nullptr, 0);
-  EXPECT_EQ(0, bitmask);
-
-  Process();
-}
-
-TEST_F(LibraryTest, GetTCPSock) {
-  ares_channel_t *channel;
-  struct ares_options opts;
-  memset(&opts, 0, sizeof(opts));
-  opts.tcp_port = 53;
-  opts.flags = ARES_FLAG_USEVC;
-  int optmask = ARES_OPT_TCP_PORT | ARES_OPT_FLAGS;
-  EXPECT_EQ(ARES_SUCCESS, ares_init_options(&channel, &opts, optmask));
-  EXPECT_NE(nullptr, channel);
-
-  ares_socket_t socks[3] = {ARES_SOCKET_BAD, ARES_SOCKET_BAD, ARES_SOCKET_BAD};
-  int bitmask = ares_getsock(channel, socks, 3);
-  EXPECT_EQ(0, bitmask);
-  bitmask = ares_getsock(channel, nullptr, 0);
-  EXPECT_EQ(0, bitmask);
-
-  // Ask again with a pending query.
-  HostResult result;
-  ares_gethostbyname(channel, "www.google.com.", AF_INET, HostCallback, &result);
-  bitmask = ares_getsock(channel, socks, 3);
-  EXPECT_NE(0, bitmask);
-
-  size_t sock_cnt = 0;
-  for (size_t i=0; i<3; i++) {
-    if (ARES_GETSOCK_READABLE(bitmask, i) || ARES_GETSOCK_WRITABLE(bitmask, i)) {
-      EXPECT_NE(ARES_SOCKET_BAD, socks[i]);
-      if (socks[i] != ARES_SOCKET_BAD)
-        sock_cnt++;
-    }
-  }
-  EXPECT_NE((size_t)0, sock_cnt);
-
-  bitmask = ares_getsock(channel, nullptr, 0);
-  EXPECT_EQ(0, bitmask);
-
-  ProcessWork(channel, NoExtraFDs, nullptr);
-
-  ares_destroy(channel);
-}
-
-TEST_F(DefaultChannelTest, VerifySocketFunctionCallback) {
-  VirtualizeIO vio(channel_);
-
-  auto my_functions = VirtualizeIO::default_functions;
-  size_t count = 0;
-
-  my_functions.asocket = [](int af, int type, int protocol, void * p) -> ares_socket_t {
-    EXPECT_NE(nullptr, p);
-    (*reinterpret_cast<size_t *>(p))++;
-    return ::socket(af, type, protocol);
-  };
-
-  ares_set_socket_functions(channel_, &my_functions, &count);
-
-  {
-    count = 0;
-    HostResult result;
-    ares_gethostbyname(channel_, "www.google.com.", AF_INET, HostCallback, &result);
-    Process();
-
-    EXPECT_TRUE(result.done_);
-    EXPECT_NE((size_t)0, count);
-  }
-
-  {
-    count = 0;
-    ares_channel_t *copy;
-    EXPECT_EQ(ARES_SUCCESS, ares_dup(&copy, channel_));
-
-    HostResult result;
-    ares_gethostbyname(copy, "www.google.com.", AF_INET, HostCallback, &result);
-
-    ProcessWork(copy, NoExtraFDs, nullptr);
-
-    EXPECT_TRUE(result.done_);
-    ares_destroy(copy);
-    EXPECT_NE((size_t)0, count);
-  }
-
-}
 
 TEST_F(DefaultChannelTest, LiveSetServers) {
   struct ares_addr_node server1;
@@ -807,7 +699,7 @@ TEST_F(DefaultChannelTest, LiveSetServersPorts) {
   server2.family = AF_INET;
   server2.addr.addr4.s_addr = htonl(0x02030405);
   server2.udp_port = 0;
-  server2.tcp_port = 0;;
+  server2.tcp_port = 0;
   EXPECT_EQ(ARES_ENODATA, ares_set_servers_ports(nullptr, &server1));
 
   // Change while pending will requeue any requests to new servers

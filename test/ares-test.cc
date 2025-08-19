@@ -41,7 +41,7 @@ extern "C" {
 #include "ares_setup.h"
 #include "ares_inet_net_pton.h"
 #include "ares_data.h"
-#include "ares_strsplit.h"
+#include "str/ares_strsplit.h"
 #include "ares_private.h"
 }
 
@@ -58,6 +58,8 @@ extern "C" {
 
 #include <functional>
 #include <sstream>
+#include <algorithm>
+#include <chrono>
 
 #ifdef WIN32
 #define BYTE_CAST (char *)
@@ -248,6 +250,17 @@ std::vector<std::pair<int, bool>> families_modes = both_families_both_modes;
 unsigned long long LibraryTest::fails_ = 0;
 std::map<size_t, int> LibraryTest::size_fails_;
 std::mutex            LibraryTest::lock_;
+bool LibraryTest::failsend_ = false;
+
+void ares_sleep_time(unsigned int ms)
+{
+  auto duration   = std::chrono::milliseconds(ms);
+  auto start_time = std::chrono::high_resolution_clock::now();
+  auto wake_time  = start_time + duration;
+  std::this_thread::sleep_until(wake_time);
+  auto end_time   = std::chrono::high_resolution_clock::now();
+  if (verbose) std::cerr << "sleep requested " << ms << "ms, slept for " << std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count() << "ms" << std::endl;
+}
 
 void ProcessWork(ares_channel_t *channel,
                  std::function<std::set<ares_socket_t>()> get_extrafds,
@@ -256,27 +269,15 @@ void ProcessWork(ares_channel_t *channel,
   int nfds, count;
   fd_set readers, writers;
 
-#ifndef CARES_SYMBOL_HIDING
-  struct timeval tv_begin  = ares__tvnow();
-  struct timeval tv_cancel = tv_begin;
+  auto tv_begin = std::chrono::high_resolution_clock::now();
+  auto tv_cancel = tv_begin;
 
   if (cancel_ms) {
     if (verbose) std::cerr << "ares_cancel will be called after " << cancel_ms << "ms" << std::endl;
-    tv_cancel.tv_sec  += (cancel_ms / 1000);
-    tv_cancel.tv_usec += ((cancel_ms % 1000) * 1000);
+    tv_cancel += std::chrono::milliseconds(cancel_ms);
   }
-#else
-  if (cancel_ms) {
-    std::cerr << "library built with symbol hiding, can't test with cancel support" << std::endl;
-    return;
-  }
-#endif
 
   while (true) {
-#ifndef CARES_SYMBOL_HIDING
-    struct timeval  tv_now = ares__tvnow();
-    struct timeval  tv_remaining;
-#endif
     struct timeval  tv;
     struct timeval *tv_select;
 
@@ -302,23 +303,24 @@ void ProcessWork(ares_channel_t *channel,
     if (tv_select == NULL)
       return;
 
-#ifndef CARES_SYMBOL_HIDING
     if (cancel_ms) {
-      unsigned int remaining_ms;
-      ares__timeval_remaining(&tv_remaining,
-                              &tv_now,
-                              &tv_cancel);
-      remaining_ms = (unsigned int)((tv_remaining.tv_sec * 1000) + (tv_remaining.tv_usec / 1000));
-      if (remaining_ms == 0) {
+      auto tv_now       = std::chrono::high_resolution_clock::now();
+      auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(tv_cancel - tv_now).count();
+
+      if (remaining_ms <= 0) {
         if (verbose) std::cerr << "Issuing ares_cancel()" << std::endl;
         ares_cancel(channel);
         cancel_ms = 0; /* Disable issuing cancel again */
       } else {
+        struct timeval tv_remaining;
+
+        tv_remaining.tv_sec = remaining_ms / 1000;
+        tv_remaining.tv_usec = (int)(remaining_ms % 1000);
+
         /* Recalculate proper timeout since we also have a cancel to wait on */
         tv_select = ares_timeout(channel, &tv_remaining, &tv);
       }
     }
-#endif
 
     count = select(nfds, &readers, &writers, nullptr, tv_select);
     if (count < 0) {
@@ -339,7 +341,29 @@ void ProcessWork(ares_channel_t *channel,
 }
 
 
+void LibraryTest::SetFailSend() {
+  failsend_ = true;
+}
+
 // static
+ares_ssize_t LibraryTest::ares_sendv_fail(ares_socket_t socket, const struct iovec *vec, int len, void *user_data)
+{
+  (void)user_data;
+
+  if (failsend_) {
+#ifdef USE_WINSOCK
+    WSASetLastError(WSAECONNREFUSED);
+#else
+    errno = ECONNREFUSED;
+#endif
+    failsend_ = false;
+    return -1;
+  }
+
+  return send(socket, (const char *)vec[0].iov_base, vec[0].iov_len, 0);
+}
+
+
 void LibraryTest::SetAllocFail(int nth) {
   lock_.lock();
   assert(nth > 0);
@@ -420,6 +444,7 @@ void DefaultChannelModeTest::Process(unsigned int cancel_ms) {
 
 MockServer::MockServer(int family, unsigned short port)
   : udpport_(port), tcpport_(port), qid_(-1) {
+  reply_ = nullptr;
   // Create a TCP socket to receive data on.
   tcp_data_ = NULL;
   tcp_data_len_ = 0;
@@ -431,10 +456,27 @@ MockServer::MockServer(int family, unsigned short port)
   // Send TCP data right away.
   setsockopt(tcpfd_, IPPROTO_TCP, TCP_NODELAY,
              BYTE_CAST &optval , sizeof(int));
+#if defined(SO_NOSIGPIPE)
+  setsockopt(tcpfd_, SOL_SOCKET, SO_NOSIGPIPE, (void *)&optval, sizeof(optval));
+#endif
+
+  /* Test system enable TCP FastOpen */
+#if defined(TCP_FASTOPEN)
+#  ifdef __linux__
+  int qlen = 32;
+  setsockopt(tcpfd_, IPPROTO_TCP, TCP_FASTOPEN, &qlen, sizeof(qlen));
+#  else
+  int on = 1;
+  setsockopt(tcpfd_, IPPROTO_TCP, TCP_FASTOPEN, BYTE_CAST &on, sizeof(on));
+#  endif
+#endif
 
   // Create a UDP socket to receive data on.
   udpfd_ = socket(family, SOCK_DGRAM, 0);
   EXPECT_NE(ARES_SOCKET_BAD, udpfd_);
+#if defined(SO_NOSIGPIPE)
+  setsockopt(udpfd_, SOL_SOCKET, SO_NOSIGPIPE, (void *)&optval, sizeof(optval));
+#endif
 
   // Bind the sockets to the given port.
   if (family == AF_INET) {
@@ -515,8 +557,12 @@ static unsigned short getaddrport(struct sockaddr_storage *addr)
 {
   if (addr->ss_family == AF_INET)
     return ntohs(((struct sockaddr_in *)(void *)addr)->sin_port);
+  if (addr->ss_family == AF_INET6)
+    return ntohs(((struct sockaddr_in6 *)(void *)addr)->sin6_port);
 
-  return ntohs(((struct sockaddr_in6 *)(void *)addr)->sin6_port);
+  /* TCP should use getpeername() to get the port, getting this from recvfrom
+   * won't work */
+  return 0;
 }
 
 void MockServer::ProcessPacket(ares_socket_t fd, struct sockaddr_storage *addr, ares_socklen_t addrlen,
@@ -555,35 +601,37 @@ void MockServer::ProcessPacket(ares_socket_t fd, struct sockaddr_storage *addr, 
   }
   if (enclen > qlen) {
     std::cerr << "(error, encoded name len " << enclen << "bigger than remaining data " << qlen << " bytes)" << std::endl;
+    ares_free_string(name);
     return;
   }
   qlen -= (int)enclen;
   question += enclen;
-  std::string namestr(name);
-  ares_free_string(name);
 
   if (qlen < 4) {
     std::cerr << "Unexpected question size (" << qlen
               << " bytes after name)" << std::endl;
+    ares_free_string(name);
     return;
   }
   if (DNS_QUESTION_CLASS(question) != C_IN) {
     std::cerr << "Unexpected question class (" << DNS_QUESTION_CLASS(question)
               << ")" << std::endl;
+    ares_free_string(name);
     return;
   }
   int rrtype = DNS_QUESTION_TYPE(question);
 
+  std::vector<byte> req(data, data + len);
+  std::string reqstr = PacketToString(req);
   if (verbose) {
-    std::vector<byte> req(data, data + len);
-    std::cerr << "received " << (fd == udpfd_ ? "UDP" : "TCP") << " request " << PacketToString(req)
+    std::cerr << "received " << (fd == udpfd_ ? "UDP" : "TCP") << " request " << reqstr
               << " on port " << (fd == udpfd_ ? udpport_ : tcpport_)
               << ":" << getaddrport(addr) << std::endl;
-    std::cerr << "ProcessRequest(" << qid << ", '" << namestr
+    std::cerr << "ProcessRequest(" << qid << ", '" << name
               << "', " << RRTypeToString(rrtype) << ")" << std::endl;
   }
-  ProcessRequest(fd, addr, addrlen, qid, namestr, rrtype);
-
+  ProcessRequest(fd, addr, addrlen, req, reqstr, qid, name, rrtype);
+  ares_free_string(name);
 }
 
 void MockServer::ProcessFD(ares_socket_t fd) {
@@ -593,7 +641,7 @@ void MockServer::ProcessFD(ares_socket_t fd) {
   }
   if (fd == tcpfd_) {
     ares_socket_t connfd = accept(tcpfd_, NULL, NULL);
-    if (connfd < 0) {
+    if (connfd == ARES_SOCKET_BAD) {
       std::cerr << "Error accepting connection on fd " << fd << std::endl;
     } else {
       connfds_.insert(connfd);
@@ -604,6 +652,7 @@ void MockServer::ProcessFD(ares_socket_t fd) {
   // Activity on a data-bearing file descriptor.
   struct sockaddr_storage addr;
   socklen_t addrlen = sizeof(addr);
+  memset(&addr, 0, sizeof(addr));
   byte buffer[2048];
   ares_ssize_t len = (ares_ssize_t)recvfrom(fd, BYTE_CAST buffer, sizeof(buffer), 0,
                      (struct sockaddr *)&addr, &addrlen);
@@ -650,18 +699,45 @@ std::set<ares_socket_t> MockServer::fds() const {
   return result;
 }
 
+void MockServer::ProcessRequest(ares_socket_t fd, struct sockaddr_storage* addr,
+                                ares_socklen_t addrlen, const std::vector<byte> &req,
+                                const std::string &reqstr,
+                                int qid, const char *name, int rrtype) {
 
-void MockServer::ProcessRequest(ares_socket_t fd, struct sockaddr_storage* addr, ares_socklen_t addrlen,
-                                int qid, const std::string& name, int rrtype) {
+  /* DNS 0x20 will mix case, do case-insensitive matching of name in request */
+  char lower_name[256];
+  int flags = 0;
+
+  arestest_strtolower(lower_name, name, sizeof(lower_name));
+
   // Before processing, let gMock know the request is happening.
-  OnRequest(name, rrtype);
+  OnRequest(lower_name, rrtype);
 
-  if (reply_.size() == 0) {
+  // If we are expecting a specific request then check it matches here.
+  if (expected_request_.length() > 0) {
+    ASSERT_EQ(expected_request_, reqstr);
+  }
+
+  if (reply_ != nullptr) {
+    ares_dns_record_t *dnsrec = NULL;
+    /* We will *attempt* to parse the request string.  It may be malformed that
+     * will lead to a parse failure.  If so, we just ignore it.  We want to
+     * pass this parsed data structure to the reply generator in case it needs
+     * to extract metadata (such as a DNS client cookie) from the original
+     * request.  If we can't parse it, oh well, we'll just pass NULL, most
+     * replies don't need anything from the request other than the name which
+     * is passed separately. */
+    ares_dns_parse(req.data(), req.size(), 0, &dnsrec);
+    exact_reply_ = reply_->data(name, dnsrec);
+    ares_dns_record_destroy(dnsrec);
+  }
+
+  if (exact_reply_.size() == 0) {
     return;
   }
 
   // Make a local copy of the current pending reply.
-  std::vector<byte> reply = reply_;
+  std::vector<byte> reply = exact_reply_;
 
   if (qid_ >= 0) {
     // Use the explicitly specified query ID.
@@ -688,11 +764,16 @@ void MockServer::ProcessRequest(ares_socket_t fd, struct sockaddr_storage* addr,
     addrlen = 0;
   }
 
-  ares_ssize_t rc = (ares_ssize_t)sendto(fd, BYTE_CAST reply.data(), (SEND_TYPE_ARG3)reply.size(), 0,
-                  (struct sockaddr *)addr, addrlen);
+#ifdef MSG_NOSIGNAL
+  flags |= MSG_NOSIGNAL;
+#endif
+
+  ares_ssize_t rc = (ares_ssize_t)sendto(fd, BYTE_CAST reply.data(), (SEND_TYPE_ARG3)reply.size(), flags,
+                                         (struct sockaddr *)addr, addrlen);
   if (rc < static_cast<ares_ssize_t>(reply.size())) {
     std::cerr << "Failed to send full reply, rc=" << rc << std::endl;
   }
+
 }
 
 // static
@@ -710,11 +791,13 @@ MockChannelOptsTest::NiceMockServers MockChannelOptsTest::BuildServers(int count
 MockChannelOptsTest::MockChannelOptsTest(int count,
                                          int family,
                                          bool force_tcp,
+                                         bool honor_sysconfig,
                                          struct ares_options* givenopts,
                                          int optmask)
   : servers_(BuildServers(count, family, mock_port)),
     server_(*servers_[0].get()), channel_(nullptr) {
   // Set up channel options.
+  const char *domains[3] = {"first.com", "second.org", "third.gov"};
   struct ares_options opts;
   if (givenopts) {
     memcpy(&opts, givenopts, sizeof(opts));
@@ -722,32 +805,51 @@ MockChannelOptsTest::MockChannelOptsTest(int count,
     memset(&opts, 0, sizeof(opts));
   }
 
-  // Point the library at the first mock server by default (overridden below).
-  opts.udp_port = server_.udpport();
-  optmask |= ARES_OPT_UDP_PORT;
-  opts.tcp_port = server_.tcpport();
-  optmask |= ARES_OPT_TCP_PORT;
+  /* Honor items from resolv.conf except the dns server itself */
+  if (!honor_sysconfig) {
+    if (!(optmask & (ARES_OPT_TIMEOUTMS|ARES_OPT_TIMEOUT))) {
+      // Reduce timeouts significantly to shorten test times.
+      opts.timeout = 250;
+      optmask |= ARES_OPT_TIMEOUTMS;
+    }
+    // If not already overridden, set 3 retries.
+    if (!(optmask & ARES_OPT_TRIES)) {
+      opts.tries = 3;
+      optmask |= ARES_OPT_TRIES;
+    }
 
-  // If not already overridden, set short-ish timeouts.
-  if (!(optmask & (ARES_OPT_TIMEOUTMS|ARES_OPT_TIMEOUT))) {
-    opts.timeout = 1500;
-    optmask |= ARES_OPT_TIMEOUTMS;
+    // If not already overridden, set search domains.
+    if (!(optmask & ARES_OPT_DOMAINS)) {
+      opts.ndomains = 3;
+      opts.domains = (char**)domains;
+      optmask |= ARES_OPT_DOMAINS;
+    }
+
+    /* Tests expect ndots=1 in general, the system config may not default to this
+     * so we don't want to inherit that. */
+    if (!(optmask & ARES_OPT_NDOTS)) {
+      opts.ndots = 1;
+      optmask |= ARES_OPT_NDOTS;
+    }
   }
-  // If not already overridden, set 3 retries.
-  if (!(optmask & ARES_OPT_TRIES)) {
-    opts.tries = 3;
-    optmask |= ARES_OPT_TRIES;
-  }
-  // If not already overridden, set search domains.
-  const char *domains[3] = {"first.com", "second.org", "third.gov"};
-  if (!(optmask & ARES_OPT_DOMAINS)) {
-    opts.ndomains = 3;
-    opts.domains = (char**)domains;
-    optmask |= ARES_OPT_DOMAINS;
-  }
+
   if (force_tcp) {
     opts.flags |= ARES_FLAG_USEVC;
     optmask |= ARES_OPT_FLAGS;
+  }
+
+  /* Disable the query cache for tests unless explicitly enabled. As of
+   * c-ares 1.31.0, the query cache is enabled by default so we have to set
+   * the option and set the TTL to 0 to effectively disable it. */
+  if (!(optmask & ARES_OPT_QUERY_CACHE)) {
+    opts.qcache_max_ttl = 0;
+    optmask |= ARES_OPT_QUERY_CACHE;
+  }
+
+  /* Enable DNS0x20 by default. Need to also turn on default flag of EDNS */
+  if (!(optmask & ARES_OPT_FLAGS)) {
+    optmask |= ARES_OPT_FLAGS;
+    opts.flags = ARES_FLAG_DNS0x20|ARES_FLAG_EDNS;
   }
 
   EXPECT_EQ(ARES_SUCCESS, ares_init_options(&channel_, &opts, optmask));
@@ -811,45 +913,35 @@ void MockChannelOptsTest::ProcessFD(ares_socket_t fd) {
   }
 }
 
-void MockChannelOptsTest::Process(unsigned int cancel_ms) {
+void MockChannelOptsTest::ProcessAltChannel(ares_channel_t *chan, unsigned int cancel_ms) {
   using namespace std::placeholders;
-  ProcessWork(channel_,
+  ProcessWork(chan,
               std::bind(&MockChannelOptsTest::fds, this),
               std::bind(&MockChannelOptsTest::ProcessFD, this, _1),
               cancel_ms);
 }
 
-void MockEventThreadOptsTest::ProcessThread() {
+void MockChannelOptsTest::Process(unsigned int cancel_ms) {
+  ProcessAltChannel(channel_, cancel_ms);
+}
+
+void MockEventThreadOptsTest::Process(unsigned int cancel_ms) {
   std::set<ares_socket_t> fds;
 
-#ifndef CARES_SYMBOL_HIDING
-  bool has_cancel_ms = false;
-  struct timeval tv_begin;
-  struct timeval tv_cancel;
-#endif
+  auto tv_begin = std::chrono::high_resolution_clock::now();
+  auto tv_cancel = tv_begin;
 
-  mutex.lock();
+  if (cancel_ms) {
+    if (verbose) std::cerr << "ares_cancel will be called after " << cancel_ms << "ms" << std::endl;
+    tv_cancel += std::chrono::milliseconds(cancel_ms);
+  }
 
-  while (isup) {
+  while (ares_queue_active_queries(channel_)) {
+    //if (verbose) std::cerr << "pending queries: " << ares_queue_active_queries(channel_) << std::endl;
+
     int nfds = 0;
     fd_set readers;
-#ifndef CARES_SYMBOL_HIDING
-    struct timeval  tv_now = ares__tvnow();
-    struct timeval  tv_remaining;
-    if (cancel_ms_ && !has_cancel_ms) {
-      tv_begin  = ares__tvnow();
-      tv_cancel = tv_begin;
-      if (verbose) std::cerr << "ares_cancel will be called after " << cancel_ms_ << "ms" << std::endl;
-      tv_cancel.tv_sec  += (cancel_ms_ / 1000);
-      tv_cancel.tv_usec += ((cancel_ms_ % 1000) * 1000);
-      has_cancel_ms = true;
-    }
-#else
-    if (cancel_ms_) {
-      std::cerr << "library built with symbol hiding, can't test with cancel support" << std::endl;
-      return;
-    }
-#endif
+
     struct timeval  tv;
 
     /* c-ares is using its own event thread, so we only need to monitor the
@@ -863,27 +955,25 @@ void MockEventThreadOptsTest::ProcessThread() {
       }
     }
 
-#ifndef CARES_SYMBOL_HIDING
-    if (has_cancel_ms) {
-      unsigned int remaining_ms;
-      ares__timeval_remaining(&tv_remaining,
-                              &tv_now,
-                              &tv_cancel);
-      remaining_ms = (unsigned int)((tv_remaining.tv_sec * 1000) + (tv_remaining.tv_usec / 1000));
-      if (remaining_ms == 0) {
-        if (verbose) std::cerr << "Issuing ares_cancel()" << std::endl;
-        ares_cancel(channel_);
-        cancel_ms_ = 0; /* Disable issuing cancel again */
-        has_cancel_ms = false;
-      }
-    }
-#endif
-
-    /* We just always wait 20ms then recheck. Not doing any complex signaling. */
+    /* We just always wait 20ms then recheck if we're done. Not doing any
+     * complex signaling. */
     tv.tv_sec  = 0;
     tv.tv_usec = 20000;
 
-    mutex.unlock();
+    if (cancel_ms) {
+      auto tv_now       = std::chrono::high_resolution_clock::now();
+      auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(tv_cancel - tv_now).count();
+
+      if (remaining_ms <= 0) {
+        if (verbose) std::cerr << "Issuing ares_cancel()" << std::endl;
+        ares_cancel(channel_);
+        cancel_ms = 0; /* Disable issuing cancel again */
+      } else {
+        tv.tv_sec = remaining_ms / 1000;
+        tv.tv_usec = (int)(remaining_ms % 1000);
+      }
+    }
+
     if (select(nfds, &readers, nullptr, nullptr, &tv) < 0) {
       fprintf(stderr, "select() failed, errno %d\n", errno);
       return;
@@ -895,10 +985,9 @@ void MockEventThreadOptsTest::ProcessThread() {
         ProcessFD(fd);
       }
     }
-    mutex.lock();
   }
-  mutex.unlock();
 
+  //if (verbose) std::cerr << "pending queries at process end: " << ares_queue_active_queries(channel_) << std::endl;
 }
 
 std::ostream& operator<<(std::ostream& os, const HostResult& result) {
@@ -921,8 +1010,13 @@ HostEnt::HostEnt(const struct hostent *hostent) : addrtype_(-1) {
   if (!hostent)
     return;
 
-  if (hostent->h_name)
-    name_ = hostent->h_name;
+  if (hostent->h_name) {
+    // DNS 0x20 may mix case, output as all lower for checks as the mixed case
+    // is really more of an internal thing
+    char lowername[256];
+    arestest_strtolower(lowername, hostent->h_name, sizeof(lowername));
+    name_ = lowername;
+  }
 
   if (hostent->h_aliases) {
     char** palias = hostent->h_aliases;
@@ -980,6 +1074,44 @@ void HostCallback(void *data, int status, int timeouts,
   if (verbose) std::cerr << "HostCallback(" << *result << ")" << std::endl;
 }
 
+std::ostream& operator<<(std::ostream& os, const AresDnsRecord& dnsrec) {
+  os << "{'";
+  /* XXX: Todo */
+  os << '}';
+  return os;
+}
+
+std::ostream& operator<<(std::ostream& os, const QueryResult& result) {
+  os << '{';
+  if (result.done_) {
+    os << StatusToString(result.status_);
+      if (result.dnsrec_.dnsrec_ != nullptr) {
+        os << " " << result.dnsrec_;
+      } else {
+        os << ", (no dnsrec)";
+      }
+  } else {
+    os << "(incomplete)";
+  }
+  os << '}';
+  return os;
+}
+
+void QueryCallback(void *data, ares_status_t status, size_t timeouts,
+                   const ares_dns_record_t *dnsrec) {
+  EXPECT_NE(nullptr, data);
+  if (data == nullptr)
+    return;
+
+  QueryResult* result = reinterpret_cast<QueryResult*>(data);
+  result->done_ = true;
+  result->status_ = status;
+  result->timeouts_ = timeouts;
+  if (dnsrec)
+    result->dnsrec_.SetDnsRecord(dnsrec);
+  if (verbose) std::cerr << "QueryCallback(" << *result << ")" << std::endl;
+}
+
 std::ostream& operator<<(std::ostream& os, const AddrInfoResult& result) {
   os << '{';
   if (result.done_ && result.ai_) {
@@ -1006,7 +1138,10 @@ std::ostream& operator<<(std::ostream& os, const AddrInfo& ai) {
     if(next_cname->name) {
       os << next_cname->name;
     }
-    if((next_cname = next_cname->next))
+
+    next_cname = next_cname->next;
+
+    if (next_cname != NULL)
       os << ", ";
     else
       os << " ";
@@ -1035,7 +1170,8 @@ std::ostream& operator<<(std::ostream& os, const AddrInfo& ai) {
       os << ":" << port;
     }
     os << "]";
-    if((next = next->ai_next))
+    next = next->ai_next;
+    if (next != NULL)
       os << ", ";
   }
   os << '}';
@@ -1074,6 +1210,23 @@ void SearchCallback(void *data, int status, int timeouts,
   result->timeouts_ = timeouts;
   result->data_.assign(abuf, abuf + alen);
   if (verbose) std::cerr << "SearchCallback(" << *result << ")" << std::endl;
+}
+
+void SearchCallbackDnsRec(void *data, ares_status_t status, size_t timeouts,
+                          const ares_dns_record_t *dnsrec) {
+  EXPECT_NE(nullptr, data);
+  SearchResult* result = reinterpret_cast<SearchResult*>(data);
+  unsigned char *abuf = NULL;
+  size_t alen = 0;
+  result->done_ = true;
+  result->status_ = (int)status;
+  result->timeouts_ = (int)timeouts;
+  if (dnsrec != NULL) {
+    ares_dns_write(dnsrec, &abuf, &alen);
+  }
+  result->data_.assign(abuf, abuf + alen);
+  ares_free_string(abuf);
+  if (verbose) std::cerr << "SearchCallbackDnsRec(" << *result << ")" << std::endl;
 }
 
 std::ostream& operator<<(std::ostream& os, const NameInfoResult& result) {

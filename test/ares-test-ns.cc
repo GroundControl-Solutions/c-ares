@@ -63,7 +63,7 @@ int EnterContainer(void *data) {
   // Ensure we are apparently root before continuing.
   int count = 10;
   while (getuid() != 0 && count > 0) {
-    usleep(100000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
     count--;
   }
   if (getuid() != 0) {
@@ -155,8 +155,8 @@ int RunInContainer(ContainerFilesystem* fs, const std::string& hostname,
   std::stringstream contentss;
   contentss << "0 " << getuid() << " 1" << std::endl;
   std::string content = contentss.str();
-  int rc = write(fd, content.c_str(), content.size());
-  if (rc != (int)content.size()) {
+  ssize_t rc = write(fd, content.c_str(), content.size());
+  if (rc != (ssize_t)content.size()) {
     std::cerr << "Failed to write uid map to '" << mapfile << "'" << std::endl;
   }
   close(fd);
@@ -181,8 +181,13 @@ ContainerFilesystem::ContainerFilesystem(NameContentList files, const std::strin
   dirs_.push_front(rootdir_);
   for (const auto& nc : files) {
     std::string fullpath = rootdir_ + nc.first;
-    int idx = fullpath.rfind('/');
-    std::string dir = fullpath.substr(0, idx);
+    size_t idx = fullpath.rfind('/');
+    std::string dir;
+    if (idx != SIZE_MAX) {
+      dir = fullpath.substr(0, idx);
+    } else {
+      dir = fullpath;
+    }
     EnsureDirExists(dir);
     files_.push_back(std::unique_ptr<TransientFile>(
         new TransientFile(fullpath, nc.second)));
@@ -209,7 +214,7 @@ void ContainerFilesystem::EnsureDirExists(const std::string& dir) {
     return;
   }
   size_t idx = dir.rfind('/');
-  if (idx != std::string::npos) {
+  if (idx != SIZE_MAX) {
     std::string prevdir = dir.substr(0, idx);
     EnsureDirExists(prevdir);
   }

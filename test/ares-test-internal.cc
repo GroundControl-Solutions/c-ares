@@ -42,12 +42,11 @@ extern "C" {
 #undef PACKAGE_STRING
 #undef PACKAGE_TARNAME
 // ... so we can include the library's config without symbol redefinitions.
-#include "ares_setup.h"
+#include "ares_private.h"
 #include "ares_inet_net_pton.h"
 #include "ares_data.h"
-#include "ares_strsplit.h"
-#include "ares_private.h"
-#include "ares__htable.h"
+#include "str/ares_strsplit.h"
+#include "dsa/ares_htable.h"
 
 #ifdef HAVE_ARPA_INET_H
 #include <arpa/inet.h>
@@ -64,6 +63,28 @@ namespace ares {
 namespace test {
 
 #ifndef CARES_SYMBOL_HIDING
+TEST_F(LibraryTest, StringLength) {
+  const char data[] = "test\0test";
+  size_t n = sizeof data;
+  for(size_t i = 0; i < n; ++i) {
+    EXPECT_EQ(ares_strlen(&data[i]), ares_strnlen(&data[i], n - i));
+  }
+}
+
+TEST_F(LibraryTest, StringLengthNullPointer) {
+  EXPECT_EQ(ares_strlen(NULL), 0);
+  EXPECT_EQ(ares_strnlen(NULL, 0), 0);
+  EXPECT_EQ(ares_strnlen(NULL, 1), 0);
+  EXPECT_EQ(ares_strnlen(NULL, 42), 0);
+}
+
+TEST_F(LibraryTest, StringLengthWithoutNullTerminator) {
+  std::string data = "test";
+  for(size_t i = 0; i < data.length(); ++i) {
+    EXPECT_EQ(ares_strnlen(data.c_str(), i), i);
+  }
+}
+
 void CheckPtoN4(int size, unsigned int value, const char *input) {
   struct in_addr a4;
   a4.s_addr = 0;
@@ -72,9 +93,7 @@ void CheckPtoN4(int size, unsigned int value, const char *input) {
     << " for input " << input;
   EXPECT_EQ(expected, a4.s_addr) << " for input " << input;
 }
-#endif
 
-#ifndef CARES_SYMBOL_HIDING
 TEST_F(LibraryTest, Strsplit) {
   using std::vector;
   using std::string;
@@ -99,7 +118,7 @@ TEST_F(LibraryTest, Strsplit) {
     },
   };
   for(size_t i = 0; i < data.inputs.size(); i++) {
-    char **out = ares__strsplit(data.inputs.at(i).c_str(),
+    char **out = ares_strsplit(data.inputs.at(i).c_str(),
                                data.delimiters.at(i).c_str(), &n);
     if(data.expected.at(i).size() == 0) {
       EXPECT_EQ(out, nullptr);
@@ -110,18 +129,14 @@ TEST_F(LibraryTest, Strsplit) {
         EXPECT_STREQ(out[j], data.expected.at(i).at(j).c_str());
       }
     }
-    ares__strsplit_free(out, n);
+    ares_strsplit_free(out, n);
   }
 }
-#endif
 
-TEST_F(LibraryTest, InetPtoN) {
+TEST_F(LibraryTest, InetNetPtoN) {
+  uint32_t expected;
   struct in_addr a4;
   struct in6_addr a6;
-
-#ifndef CARES_SYMBOL_HIDING
-  uint32_t expected;
-
   CheckPtoN4(4 * 8, 0x01020304, "1.2.3.4");
   CheckPtoN4(4 * 8, 0x81010101, "129.1.1.1");
   CheckPtoN4(4 * 8, 0xC0010101, "192.1.1.1");
@@ -221,8 +236,241 @@ TEST_F(LibraryTest, InetPtoN) {
   EXPECT_EQ(-1, ares_inet_net_pton(AF_INET, "0x0xyz", &a4, 0));
   EXPECT_EQ(-1, ares_inet_net_pton(AF_INET, "0x1122334", &a4, sizeof(a4) - 1));
   EXPECT_EQ(-1, ares_inet_net_pton(AF_INET, "253", &a4, sizeof(a4) - 1));
+}
+
+TEST_F(LibraryTest, FreeLongChain) {
+  struct ares_addr_node *data = nullptr;
+  for (int ii = 0; ii < 100000; ii++) {
+    struct ares_addr_node *prev = (struct ares_addr_node*)ares_malloc_data(ARES_DATATYPE_ADDR_NODE);
+    prev->next = data;
+    data = prev;
+  }
+
+  ares_free_data(data);
+}
+
+TEST_F(LibraryTest, MallocDataFail) {
+  EXPECT_EQ(nullptr, ares_malloc_data((ares_datatype)99));
+  SetAllocSizeFail(sizeof(struct ares_data));
+  EXPECT_EQ(nullptr, ares_malloc_data(ARES_DATATYPE_MX_REPLY));
+}
+
+TEST(Misc, OnionDomain) {
+  EXPECT_EQ(0, ares_is_onion_domain("onion.no"));
+  EXPECT_EQ(0, ares_is_onion_domain(".onion.no"));
+  EXPECT_EQ(1, ares_is_onion_domain(".onion"));
+  EXPECT_EQ(1, ares_is_onion_domain(".onion."));
+  EXPECT_EQ(1, ares_is_onion_domain("yes.onion"));
+  EXPECT_EQ(1, ares_is_onion_domain("yes.onion."));
+  EXPECT_EQ(1, ares_is_onion_domain("YES.ONION"));
+  EXPECT_EQ(1, ares_is_onion_domain("YES.ONION."));
+}
+
+TEST_F(LibraryTest, CatDomain) {
+  char *s;
+
+  ares_cat_domain("foo", "example.net", &s);
+  EXPECT_STREQ("foo.example.net", s);
+  ares_free(s);
+
+  ares_cat_domain("foo", ".", &s);
+  EXPECT_STREQ("foo.", s);
+  ares_free(s);
+
+  ares_cat_domain("foo", "example.net.", &s);
+  EXPECT_STREQ("foo.example.net.", s);
+  ares_free(s);
+}
+
+TEST_F(LibraryTest, SlistMisuse) {
+  EXPECT_EQ(NULL, ares_slist_create(NULL, NULL, NULL));
+  ares_slist_replace_destructor(NULL, NULL);
+  EXPECT_EQ(NULL, ares_slist_insert(NULL, NULL));
+  EXPECT_EQ(NULL, ares_slist_node_find(NULL, NULL));
+  EXPECT_EQ(NULL, ares_slist_node_first(NULL));
+  EXPECT_EQ(NULL, ares_slist_node_last(NULL));
+  EXPECT_EQ(NULL, ares_slist_node_next(NULL));
+  EXPECT_EQ(NULL, ares_slist_node_prev(NULL));
+  EXPECT_EQ(NULL, ares_slist_node_val(NULL));
+  EXPECT_EQ((size_t)0, ares_slist_len(NULL));
+  EXPECT_EQ(NULL, ares_slist_node_parent(NULL));
+  EXPECT_EQ(NULL, ares_slist_first_val(NULL));
+  EXPECT_EQ(NULL, ares_slist_last_val(NULL));
+  EXPECT_EQ(NULL, ares_slist_node_claim(NULL));
+}
+
+#if !defined(_WIN32) || _WIN32_WINNT >= 0x0600
+TEST_F(LibraryTest, IfaceIPs) {
+  ares_status_t      status;
+  ares_iface_ips_t *ips = NULL;
+  size_t             i;
+
+  status = ares_iface_ips(&ips, ARES_IFACE_IP_DEFAULT, NULL);
+  EXPECT_TRUE(status == ARES_SUCCESS || status == ARES_ENOTIMP);
+
+  /* Not implemented, can't run tests */
+  if (status == ARES_ENOTIMP)
+    return;
+
+  EXPECT_NE(nullptr, ips);
+
+  for (i=0; i<ares_iface_ips_cnt(ips); i++) {
+    const char *name = ares_iface_ips_get_name(ips, i);
+    EXPECT_NE(nullptr, name);
+    int flags = (int)ares_iface_ips_get_flags(ips, i);
+    EXPECT_NE(0, (int)flags);
+    EXPECT_NE(nullptr, ares_iface_ips_get_addr(ips, i));
+    EXPECT_NE(0, ares_iface_ips_get_netmask(ips, i));
+    if (flags & ARES_IFACE_IP_LINKLOCAL && flags & ARES_IFACE_IP_V6) {
+      /* Hmm, seems not to work at least on MacOS
+       * EXPECT_NE(0, ares_iface_ips_get_ll_scope(ips, i));
+       */
+    } else {
+      EXPECT_EQ(0, ares_iface_ips_get_ll_scope(ips, i));
+    }
+    unsigned int idx = ares_os_if_nametoindex(name);
+    EXPECT_NE(0, idx);
+    char namebuf[256];
+    EXPECT_EQ(std::string(ares_os_if_indextoname(idx, namebuf, sizeof(namebuf))), std::string(name));
+  }
+
+
+  /* Negative checking */
+  ares_iface_ips_get_name(ips, ares_iface_ips_cnt(ips));
+  ares_iface_ips_get_flags(ips, ares_iface_ips_cnt(ips));
+  ares_iface_ips_get_addr(ips, ares_iface_ips_cnt(ips));
+  ares_iface_ips_get_netmask(ips, ares_iface_ips_cnt(ips));
+  ares_iface_ips_get_ll_scope(ips, ares_iface_ips_cnt(ips));
+
+  ares_iface_ips(NULL, ARES_IFACE_IP_DEFAULT, NULL);
+  ares_iface_ips_cnt(NULL);
+  ares_iface_ips_get_name(NULL, 0);
+  ares_iface_ips_get_flags(NULL, 0);
+  ares_iface_ips_get_addr(NULL, 0);
+  ares_iface_ips_get_netmask(NULL, 0);
+  ares_iface_ips_get_ll_scope(NULL, 0);
+  ares_iface_ips_destroy(NULL);
+  ares_os_if_nametoindex(NULL);
+  ares_os_if_indextoname(0, NULL, 0);
+
+  ares_iface_ips_destroy(ips);
+}
 #endif
 
+TEST_F(LibraryTest, HtableMisuse) {
+  EXPECT_EQ(NULL, ares_htable_create(NULL, NULL, NULL, NULL));
+  EXPECT_EQ(ARES_FALSE, ares_htable_insert(NULL, NULL));
+  EXPECT_EQ(NULL, ares_htable_get(NULL, NULL));
+  EXPECT_EQ(ARES_FALSE, ares_htable_remove(NULL, NULL));
+  EXPECT_EQ((size_t)0, ares_htable_num_keys(NULL));
+}
+
+TEST_F(LibraryTest, URI) {
+  struct {
+    ares_bool_t success;
+    const char *uri;
+    const char *alt_match_uri;
+  } tests[] = {
+    { ARES_TRUE,  "https://www.example.com",                                                               NULL },
+    { ARES_TRUE,  "https://www.example.com:8443",                                                          NULL },
+    { ARES_TRUE,  "https://user:password@www.example.com",                                                 NULL },
+    { ARES_TRUE,  "https://user%25:password@www.example.com",                                              NULL },
+    { ARES_TRUE,  "https://user:password%25@www.example.com",                                              NULL },
+    { ARES_TRUE,  "https://user@www.example.com",                                                          NULL },
+    { ARES_TRUE,  "https://www.example.com/path",                                                          NULL },
+    { ARES_TRUE,  "https://www.example.com/path/",                                                         NULL },
+    { ARES_TRUE,  "https://www.example.com/a/../",                                                         "https://www.example.com/" },
+    { ARES_TRUE,  "https://www.example.com/../a/",                                                         "https://www.example.com/a/" },
+    { ARES_TRUE,  "https://www.example.com/.././../a/",                                                    "https://www.example.com/a/" },
+    { ARES_TRUE,  "https://www.example.com/.././../a//b/c/d/../../",                                       "https://www.example.com/a/b/" },
+    { ARES_TRUE,  "https://www.example.com?key=val",                                                       NULL },
+    { ARES_TRUE,  "https://www.example.com?key",                                                           NULL },
+    { ARES_TRUE,  "https://www.example.com?key=",                                                          "https://www.example.com?key" },
+    { ARES_TRUE,  "https://www.example.com#fragment",                                                      NULL },
+    { ARES_TRUE,  "https://user:password@www.example.com/path",                                            NULL },
+    { ARES_TRUE,  "https://user:password@www.example.com/path#fragment",                                   NULL },
+    { ARES_TRUE,  "https://user:password@www.example.com/path?key=val",                                    NULL },
+    { ARES_TRUE,  "https://user:password@www.example.com/path?key=val#fragment",                           NULL },
+    { ARES_TRUE,  "https://user:password@www.example.com/path?key=val#fragment/with?chars",                NULL },
+    { ARES_TRUE,  "HTTPS://www.example.com",                                                               "https://www.example.com" },
+    { ARES_TRUE,  "https://www.example.com?key=hello+world",                                               "https://www.example.com?key=hello%20world" },
+    { ARES_TRUE,  "https://www.example.com?key=val%26",                                                    NULL },
+    { ARES_TRUE,  "https://www.example.com?key%26=val",                                                    NULL },
+    { ARES_TRUE,  "https://www.example.com?key=Aa2-._~/?!$'()*,;:@",                                       NULL },
+    { ARES_TRUE,  "https://www.example.com?key1=val1&key2=val2&key3=val3&key4=val4",                       "ignore" }, /* keys get randomized, can't match */
+    { ARES_TRUE,  "https://www.example.com?key=%41%61%32%2D%2E%5f%7e%2F%3F%21%24%27%28%29%2a%2C%3b%3a%40", "https://www.example.com?key=Aa2-._~/?!$'()*,;:@" },
+    { ARES_TRUE,  "dns+tls://192.168.1.1:53",                                                              NULL },
+    { ARES_TRUE,  "dns+tls://[fe80::1]:53",                                                                NULL },
+    { ARES_TRUE,  "dns://[fe80::b542:84df:1719:65e3%en0]",                                                 NULL },
+    { ARES_TRUE,  "dns+tls://[fe80:00::00:1]:53",                                                          "dns+tls://[fe80::1]:53" },
+    { ARES_TRUE,  "d.n+s-tls://www.example.com",                                                           NULL },
+    { ARES_FALSE, "dns*tls://www.example.com",                                                             NULL }, /* invalid scheme character */
+    { ARES_FALSE, "0dns://www.example.com",                                                                NULL }, /* dns can't start with digits */
+    { ARES_FALSE, "https://www.example.com?key=val%01",                                                    NULL }, /* non-printable character */
+    { ARES_FALSE, "abcdef0123456789://www.example.com",                                                    NULL }, /* scheme too long */
+    { ARES_FALSE, "www.example.com",                                                                       NULL }, /* missing scheme */
+    { ARES_FALSE, "https://www.example.com?key=val%0",                                                     NULL }, /* truncated uri-encoding */
+    { ARES_FALSE, "https://www.example.com?key=val%AZ",                                                    NULL }, /* invalid uri-encoding sequence */
+    { ARES_FALSE, "https://www.example.com?key=hello world",                                               NULL }, /* invalid character in query value */
+    { ARES_FALSE, "https://:password@www.example.com",                                                     NULL }, /* can't have password without username */
+    { ARES_FALSE, "dns+tls://[fe8G::1]",                                                                   NULL }, /* invalid ipv6 address */
+
+    { ARES_FALSE, NULL, NULL }
+  };
+  size_t i;
+
+  for (i=0; tests[i].uri != NULL; i++) {
+    ares_uri_t *uri = NULL;
+    ares_status_t status;
+
+    if (verbose) std::cerr << "Testing " << tests[i].uri << std::endl;
+    status = ares_uri_parse(&uri, tests[i].uri);
+    if (tests[i].success) {
+      EXPECT_EQ(ARES_SUCCESS, status);
+    } else {
+      EXPECT_NE(ARES_SUCCESS, status);
+    }
+
+    if (status == ARES_SUCCESS) {
+      char *out = NULL;
+      EXPECT_EQ(ARES_SUCCESS, ares_uri_write(&out, uri));
+      if (tests[i].alt_match_uri == NULL || strcmp(tests[i].alt_match_uri, "ignore") != 0) {
+        EXPECT_STRCASEEQ(tests[i].alt_match_uri == NULL?tests[i].uri:tests[i].alt_match_uri, out);
+      }
+      ares_free(out);
+    }
+    ares_uri_destroy(uri);
+  }
+
+  /* Invalid tests  */
+  EXPECT_NE(ARES_SUCCESS, ares_uri_set_scheme(NULL, NULL));
+  EXPECT_EQ(nullptr, ares_uri_get_scheme(NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_uri_set_username(NULL, NULL));
+  EXPECT_EQ(nullptr, ares_uri_get_username(NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_uri_set_password(NULL, NULL));
+  EXPECT_EQ(nullptr, ares_uri_get_password(NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_uri_set_host(NULL, NULL));
+  EXPECT_EQ(nullptr, ares_uri_get_host(NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_uri_set_port(NULL, 0));
+  EXPECT_EQ(0, ares_uri_get_port(NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_uri_set_path(NULL, NULL));
+  EXPECT_EQ(nullptr, ares_uri_get_path(NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_uri_set_query_key(NULL, NULL, NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_uri_del_query_key(NULL, NULL));
+  EXPECT_EQ(nullptr, ares_uri_get_query_key(NULL, NULL));
+  EXPECT_EQ(nullptr, ares_uri_get_query_keys(NULL, NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_uri_set_fragment(NULL, NULL));
+  EXPECT_EQ(nullptr, ares_uri_get_fragment(NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_uri_write_buf(NULL, NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_uri_write(NULL, NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_uri_parse_buf(NULL, NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_uri_parse_buf(NULL, NULL));
+}
+#endif /* !CARES_SYMBOL_HIDING */
+
+TEST_F(LibraryTest, InetPtoN) {
+  struct in_addr a4;
+  struct in6_addr a6;
   EXPECT_EQ(1, ares_inet_pton(AF_INET, "1.2.3.4", &a4));
   EXPECT_EQ(1, ares_inet_pton(AF_INET6, "12:34::ff", &a6));
   EXPECT_EQ(1, ares_inet_pton(AF_INET6, "12:34::ffff:1.2.3.4", &a6));
@@ -252,18 +500,6 @@ TEST_F(LibraryTest, FreeCorruptData) {
   free(data);
 }
 
-#ifndef CARES_SYMBOL_HIDING
-TEST_F(LibraryTest, FreeLongChain) {
-  struct ares_addr_node *data = nullptr;
-  for (int ii = 0; ii < 100000; ii++) {
-    struct ares_addr_node *prev = (struct ares_addr_node*)ares_malloc_data(ARES_DATATYPE_ADDR_NODE);
-    prev->next = data;
-    data = prev;
-  }
-
-  ares_free_data(data);
-}
-
 TEST(LibraryInit, StrdupFailures) {
   EXPECT_EQ(ARES_SUCCESS, ares_library_init(ARES_LIB_INIT_ALL));
   char* copy = ares_strdup("string");
@@ -278,55 +514,6 @@ TEST_F(LibraryTest, StrdupFailures) {
   EXPECT_EQ(nullptr, copy);
 }
 
-TEST_F(LibraryTest, MallocDataFail) {
-  EXPECT_EQ(nullptr, ares_malloc_data((ares_datatype)99));
-  SetAllocSizeFail(sizeof(struct ares_data));
-  EXPECT_EQ(nullptr, ares_malloc_data(ARES_DATATYPE_MX_REPLY));
-}
-
-TEST_F(LibraryTest, ReadLine) {
-  TempFile temp("abcde\n0123456789\nXYZ\n012345678901234567890\n\n");
-  FILE *fp = fopen(temp.filename(), "r");
-  size_t bufsize = 4;
-  char *buf = (char *)ares_malloc(bufsize);
-
-  EXPECT_EQ(ARES_SUCCESS, ares__read_line(fp, &buf, &bufsize));
-  EXPECT_EQ("abcde", std::string(buf));
-  EXPECT_EQ(ARES_SUCCESS, ares__read_line(fp, &buf, &bufsize));
-  EXPECT_EQ("0123456789", std::string(buf));
-  EXPECT_EQ(ARES_SUCCESS, ares__read_line(fp, &buf, &bufsize));
-  EXPECT_EQ("XYZ", std::string(buf));
-  SetAllocFail(1);
-  EXPECT_EQ(ARES_ENOMEM, ares__read_line(fp, &buf, &bufsize));
-  EXPECT_EQ(nullptr, buf);
-
-  fclose(fp);
-  ares_free(buf);
-}
-
-TEST_F(LibraryTest, ReadLineNoBuf) {
-  TempFile temp("abcde\n0123456789\nXYZ\n012345678901234567890");
-  FILE *fp = fopen(temp.filename(), "r");
-  size_t bufsize = 0;
-  char *buf = nullptr;
-
-  SetAllocFail(1);
-  EXPECT_EQ(ARES_ENOMEM, ares__read_line(fp, &buf, &bufsize));
-
-  EXPECT_EQ(ARES_SUCCESS, ares__read_line(fp, &buf, &bufsize));
-  EXPECT_EQ("abcde", std::string(buf));
-  EXPECT_EQ(ARES_SUCCESS, ares__read_line(fp, &buf, &bufsize));
-  EXPECT_EQ("0123456789", std::string(buf));
-  EXPECT_EQ(ARES_SUCCESS, ares__read_line(fp, &buf, &bufsize));
-  EXPECT_EQ("XYZ", std::string(buf));
-  EXPECT_EQ(ARES_SUCCESS, ares__read_line(fp, &buf, &bufsize));
-  EXPECT_EQ("012345678901234567890", std::string(buf));
-
-  fclose(fp);
-  ares_free(buf);
-}
-
-
 TEST_F(FileChannelTest, GetAddrInfoHostsPositive) {
   TempFile hostsfile("1.2.3.4 example.com  \n"
                      "  2.3.4.5\tgoogle.com   www.google.com\twww2.google.com\n"
@@ -335,7 +522,7 @@ TEST_F(FileChannelTest, GetAddrInfoHostsPositive) {
                      "1.3.5.7  \n"
                      "::1    ipv6.com");
   EnvValue with_env("CARES_HOSTS", hostsfile.filename());
-  struct ares_addrinfo_hints hints = {};
+  struct ares_addrinfo_hints hints = {0, 0, 0, 0};
   AddrInfoResult result = {};
   hints.ai_family = AF_INET;
   hints.ai_flags = ARES_AI_CANONNAME | ARES_AI_ENVHOSTS | ARES_AI_NOSORT;
@@ -355,7 +542,7 @@ TEST_F(FileChannelTest, GetAddrInfoHostsSpaces) {
                      "1.3.5.7  \n"
                      "::1    ipv6.com");
   EnvValue with_env("CARES_HOSTS", hostsfile.filename());
-  struct ares_addrinfo_hints hints = {};
+  struct ares_addrinfo_hints hints = {0, 0, 0, 0};
   AddrInfoResult result = {};
   hints.ai_family = AF_INET;
   hints.ai_flags = ARES_AI_CANONNAME | ARES_AI_ENVHOSTS | ARES_AI_NOSORT;
@@ -375,7 +562,7 @@ TEST_F(FileChannelTest, GetAddrInfoHostsByALias) {
                      "1.3.5.7  \n"
                      "::1    ipv6.com");
   EnvValue with_env("CARES_HOSTS", hostsfile.filename());
-  struct ares_addrinfo_hints hints = {};
+  struct ares_addrinfo_hints hints = {0, 0, 0, 0};
   AddrInfoResult result = {};
   hints.ai_family = AF_INET;
   hints.ai_flags = ARES_AI_CANONNAME | ARES_AI_ENVHOSTS | ARES_AI_NOSORT;
@@ -395,7 +582,7 @@ TEST_F(FileChannelTest, GetAddrInfoHostsIPV6) {
                      "1.3.5.7  \n"
                      "::1    ipv6.com");
   EnvValue with_env("CARES_HOSTS", hostsfile.filename());
-  struct ares_addrinfo_hints hints = {};
+  struct ares_addrinfo_hints hints = {0, 0, 0, 0};
   AddrInfoResult result = {};
   hints.ai_family = AF_INET6;
   hints.ai_flags = ARES_AI_CANONNAME | ARES_AI_ENVHOSTS | ARES_AI_NOSORT;
@@ -437,17 +624,6 @@ TEST_F(FileChannelTest, GetAddrInfoAllocFail) {
   }
 }
 
-TEST(Misc, OnionDomain) {
-  EXPECT_EQ(0, ares__is_onion_domain("onion.no"));
-  EXPECT_EQ(0, ares__is_onion_domain(".onion.no"));
-  EXPECT_EQ(1, ares__is_onion_domain(".onion"));
-  EXPECT_EQ(1, ares__is_onion_domain(".onion."));
-  EXPECT_EQ(1, ares__is_onion_domain("yes.onion"));
-  EXPECT_EQ(1, ares__is_onion_domain("yes.onion."));
-  EXPECT_EQ(1, ares__is_onion_domain("YES.ONION"));
-  EXPECT_EQ(1, ares__is_onion_domain("YES.ONION."));
-}
-
 TEST_F(LibraryTest, DNSRecord) {
   ares_dns_record_t   *dnsrec = NULL;
   ares_dns_rr_t       *rr     = NULL;
@@ -476,14 +652,14 @@ TEST_F(LibraryTest, DNSRecord) {
   EXPECT_EQ(ARES_SUCCESS,
     ares_dns_record_rr_add(&rr, dnsrec, ARES_SECTION_ANSWER, "example.com",
       ARES_REC_TYPE_A, ARES_CLASS_IN, 300));
-  EXPECT_LT(0, ares_inet_net_pton(AF_INET, "1.1.1.1", &addr, sizeof(addr)));
+  EXPECT_LT(0, ares_inet_pton(AF_INET, "1.1.1.1", &addr));
   EXPECT_EQ(ARES_SUCCESS,
     ares_dns_rr_set_addr(rr, ARES_RR_A_ADDR, &addr));
   /* AAAA */
   EXPECT_EQ(ARES_SUCCESS,
     ares_dns_record_rr_add(&rr, dnsrec, ARES_SECTION_ANSWER, "example.com",
       ARES_REC_TYPE_AAAA, ARES_CLASS_IN, 300));
-  EXPECT_LT(0, ares_inet_net_pton(AF_INET6, "2600::4", &addr6, sizeof(addr6)));
+  EXPECT_LT(0, ares_inet_pton(AF_INET6, "2600::4", &addr6));
   EXPECT_EQ(ARES_SUCCESS,
     ares_dns_rr_set_addr6(rr, ARES_RR_AAAA_ADDR, &addr6));
   /* MX */
@@ -504,10 +680,41 @@ TEST_F(LibraryTest, DNSRecord) {
   EXPECT_EQ(ARES_SUCCESS,
     ares_dns_record_rr_add(&rr, dnsrec, ARES_SECTION_ANSWER, "example.com",
       ARES_REC_TYPE_TXT, ARES_CLASS_IN, 3600));
-  const char txt[] = "blah=here blah=there anywhere";
+  const char txt1[] = "blah=here blah=there anywhere";
+  const char txt2[] = "some other record";
   EXPECT_EQ(ARES_SUCCESS,
-    ares_dns_rr_set_bin(rr, ARES_RR_TXT_DATA, (unsigned char *)txt,
-      sizeof(txt)));
+    ares_dns_rr_add_abin(rr, ARES_RR_TXT_DATA, (unsigned char *)txt1,
+      sizeof(txt1)-1));
+   EXPECT_EQ(ARES_SUCCESS,
+    ares_dns_rr_add_abin(rr, ARES_RR_TXT_DATA, (unsigned char *)txt2,
+      sizeof(txt2)-1));
+  /* SIG */
+  EXPECT_EQ(ARES_SUCCESS,
+    ares_dns_record_rr_add(&rr, dnsrec, ARES_SECTION_ANSWER, "example.com",
+      ARES_REC_TYPE_SIG, ARES_CLASS_ANY, 0));
+  EXPECT_EQ(ARES_SUCCESS,
+    ares_dns_rr_set_u16(rr, ARES_RR_SIG_TYPE_COVERED, ARES_REC_TYPE_TXT));
+  EXPECT_EQ(ARES_SUCCESS,
+    ares_dns_rr_set_u8(rr, ARES_RR_SIG_ALGORITHM, 1));
+  EXPECT_EQ(ARES_SUCCESS,
+    ares_dns_rr_set_u8(rr, ARES_RR_SIG_LABELS, 1));
+  EXPECT_EQ(ARES_SUCCESS,
+    ares_dns_rr_set_u32(rr, ARES_RR_SIG_ORIGINAL_TTL, 3200));
+  EXPECT_EQ(ARES_SUCCESS,
+    ares_dns_rr_set_u32(rr, ARES_RR_SIG_EXPIRATION, (unsigned int)time(NULL)));
+  EXPECT_EQ(ARES_SUCCESS,
+    ares_dns_rr_set_u32(rr, ARES_RR_SIG_INCEPTION, (unsigned int)time(NULL) - (86400 * 365)));
+  EXPECT_EQ(ARES_SUCCESS,
+    ares_dns_rr_set_u16(rr, ARES_RR_SIG_KEY_TAG, 0x1234));
+  EXPECT_EQ(ARES_SUCCESS,
+    ares_dns_rr_set_str(rr, ARES_RR_SIG_SIGNERS_NAME, "signer.example.com"));
+  const unsigned char sig[] = {
+    0xd2, 0xab, 0xde, 0x24, 0x0d, 0x7c, 0xd3, 0xee, 0x6b, 0x4b, 0x28, 0xc5,
+    0x4d, 0xf0, 0x34, 0xb9, 0x79, 0x83, 0xa1, 0xd1, 0x6e, 0x8a, 0x41, 0x0e,
+    0x45, 0x61, 0xcb, 0x10, 0x66, 0x18, 0xe9, 0x71 };
+  EXPECT_EQ(ARES_SUCCESS,
+    ares_dns_rr_set_bin(rr, ARES_RR_SIG_SIGNATURE, sig, sizeof(sig)));
+
 
   /* == Authority == */
   /* NS */
@@ -688,16 +895,17 @@ TEST_F(LibraryTest, DNSRecord) {
   /* Write */
   EXPECT_EQ(ARES_SUCCESS, ares_dns_write(dnsrec, &msg, &msglen));
 
-  ares__buf_t *hexdump = ares__buf_create();
-  EXPECT_EQ(ARES_SUCCESS, ares__buf_hexdump(hexdump, msg, msglen));
-  char *hexdata = ares__buf_finish_str(hexdump, NULL);
+  ares_buf_t *hexdump = ares_buf_create();
+  EXPECT_EQ(ARES_SUCCESS, ares_buf_hexdump(hexdump, msg, msglen));
+  char *hexdata = ares_buf_finish_str(hexdump, NULL);
   //printf("HEXDUMP\n%s", hexdata);
   ares_free(hexdata);
+
   ares_dns_record_destroy(dnsrec); dnsrec = NULL;
 
   /* Parse */
   EXPECT_EQ(ARES_SUCCESS, ares_dns_parse(msg, msglen, 0, &dnsrec));
-  ares_free(msg); msg = NULL;
+  ares_free_string(msg); msg = NULL;
 
   /* Re-write */
   EXPECT_EQ(ARES_SUCCESS, ares_dns_write(dnsrec, &msg, &msglen));
@@ -708,112 +916,169 @@ TEST_F(LibraryTest, DNSRecord) {
   EXPECT_EQ(arcount, ares_dns_record_rr_cnt(dnsrec, ARES_SECTION_ADDITIONAL));
 
   /* Iterate and print */
-  ares__buf_t *printmsg = ares__buf_create();
-  ares__buf_append_str(printmsg, ";; ->>HEADER<<- opcode: ");
-  ares__buf_append_str(printmsg, ares_dns_opcode_tostr(ares_dns_record_get_opcode(dnsrec)));
-  ares__buf_append_str(printmsg, ", status: ");
-  ares__buf_append_str(printmsg, ares_dns_rcode_tostr(ares_dns_record_get_rcode(dnsrec)));
-  ares__buf_append_str(printmsg, ", id: ");
-  ares__buf_append_num_dec(printmsg, (size_t)ares_dns_record_get_id(dnsrec), 0);
-  ares__buf_append_str(printmsg, "\n;; flags: ");
-  ares__buf_append_num_hex(printmsg, (size_t)ares_dns_record_get_flags(dnsrec), 0);
-  ares__buf_append_str(printmsg, "; QUERY: ");
-  ares__buf_append_num_dec(printmsg, ares_dns_record_query_cnt(dnsrec), 0);
-  ares__buf_append_str(printmsg, ", ANSWER: ");
-  ares__buf_append_num_dec(printmsg, ares_dns_record_rr_cnt(dnsrec, ARES_SECTION_ANSWER), 0);
-  ares__buf_append_str(printmsg, ", AUTHORITY: ");
-  ares__buf_append_num_dec(printmsg, ares_dns_record_rr_cnt(dnsrec, ARES_SECTION_AUTHORITY), 0);
-  ares__buf_append_str(printmsg, ", ADDITIONAL: ");
-  ares__buf_append_num_dec(printmsg, ares_dns_record_rr_cnt(dnsrec, ARES_SECTION_ADDITIONAL), 0);
-  ares__buf_append_str(printmsg, "\n\n");
-  ares__buf_append_str(printmsg, ";; QUESTION SECTION:\n");
+  ares_buf_t *printmsg = ares_buf_create();
+  ares_buf_append_str(printmsg, ";; ->>HEADER<<- opcode: ");
+  ares_buf_append_str(printmsg, ares_dns_opcode_tostr(ares_dns_record_get_opcode(dnsrec)));
+  ares_buf_append_str(printmsg, ", status: ");
+  ares_buf_append_str(printmsg, ares_dns_rcode_tostr(ares_dns_record_get_rcode(dnsrec)));
+  ares_buf_append_str(printmsg, ", id: ");
+  ares_buf_append_num_dec(printmsg, (size_t)ares_dns_record_get_id(dnsrec), 0);
+  ares_buf_append_str(printmsg, "\n;; flags: ");
+  ares_buf_append_num_hex(printmsg, (size_t)ares_dns_record_get_flags(dnsrec), 0);
+  ares_buf_append_str(printmsg, "; QUERY: ");
+  ares_buf_append_num_dec(printmsg, ares_dns_record_query_cnt(dnsrec), 0);
+  ares_buf_append_str(printmsg, ", ANSWER: ");
+  ares_buf_append_num_dec(printmsg, ares_dns_record_rr_cnt(dnsrec, ARES_SECTION_ANSWER), 0);
+  ares_buf_append_str(printmsg, ", AUTHORITY: ");
+  ares_buf_append_num_dec(printmsg, ares_dns_record_rr_cnt(dnsrec, ARES_SECTION_AUTHORITY), 0);
+  ares_buf_append_str(printmsg, ", ADDITIONAL: ");
+  ares_buf_append_num_dec(printmsg, ares_dns_record_rr_cnt(dnsrec, ARES_SECTION_ADDITIONAL), 0);
+  ares_buf_append_str(printmsg, "\n\n");
+  ares_buf_append_str(printmsg, ";; QUESTION SECTION:\n");
   for (size_t i = 0; i < ares_dns_record_query_cnt(dnsrec); i++) {
     const char         *name;
     ares_dns_rec_type_t qtype;
     ares_dns_class_t    qclass;
     ares_dns_record_query_get(dnsrec, i, &name, &qtype, &qclass);
-    ares__buf_append_str(printmsg, ";");
-    ares__buf_append_str(printmsg, name);
-    ares__buf_append_str(printmsg, ".\t\t\t");
-    ares__buf_append_str(printmsg, ares_dns_class_tostr(qclass));
-    ares__buf_append_str(printmsg, "\t");
-    ares__buf_append_str(printmsg, ares_dns_rec_type_tostr(qtype));
-    ares__buf_append_str(printmsg, "\n");
+    ares_buf_append_str(printmsg, ";");
+    ares_buf_append_str(printmsg, name);
+    ares_buf_append_str(printmsg, ".\t\t\t");
+    ares_buf_append_str(printmsg, ares_dns_class_tostr(qclass));
+    ares_buf_append_str(printmsg, "\t");
+    ares_buf_append_str(printmsg, ares_dns_rec_type_tostr(qtype));
+    ares_buf_append_str(printmsg, "\n");
   }
-  ares__buf_append_str(printmsg, "\n");
+  ares_buf_append_str(printmsg, "\n");
   for (size_t i = ARES_SECTION_ANSWER; i < ARES_SECTION_ADDITIONAL + 1; i++) {
-    ares__buf_append_str(printmsg, ";; ");
-    ares__buf_append_str(printmsg, ares_dns_section_tostr((ares_dns_section_t)i));
-    ares__buf_append_str(printmsg, " SECTION:\n");
+    ares_buf_append_str(printmsg, ";; ");
+    ares_buf_append_str(printmsg, ares_dns_section_tostr((ares_dns_section_t)i));
+    ares_buf_append_str(printmsg, " SECTION:\n");
     for (size_t j = 0; j < ares_dns_record_rr_cnt(dnsrec, (ares_dns_section_t)i); j++) {
-      const ares_dns_rr_t *rr = ares_dns_record_rr_get(dnsrec, (ares_dns_section_t)i, j);
-      ares__buf_append_str(printmsg, ares_dns_rr_get_name(rr));
-      ares__buf_append_str(printmsg, ".\t\t\t");
-      ares__buf_append_str(printmsg, ares_dns_class_tostr(ares_dns_rr_get_class(rr)));
-      ares__buf_append_str(printmsg, "\t");
-      ares__buf_append_str(printmsg, ares_dns_rec_type_tostr(ares_dns_rr_get_type(rr)));
-      ares__buf_append_str(printmsg, "\t");
-      ares__buf_append_num_dec(printmsg, ares_dns_rr_get_ttl(rr), 0);
-      ares__buf_append_str(printmsg, "\t");
+      rr = ares_dns_record_rr_get(dnsrec, (ares_dns_section_t)i, j);
+      ares_buf_append_str(printmsg, ares_dns_rr_get_name(rr));
+      ares_buf_append_str(printmsg, ".\t\t\t");
+      ares_buf_append_str(printmsg, ares_dns_class_tostr(ares_dns_rr_get_class(rr)));
+      ares_buf_append_str(printmsg, "\t");
+      ares_buf_append_str(printmsg, ares_dns_rec_type_tostr(ares_dns_rr_get_type(rr)));
+      ares_buf_append_str(printmsg, "\t");
+      ares_buf_append_num_dec(printmsg, ares_dns_rr_get_ttl(rr), 0);
+      ares_buf_append_str(printmsg, "\t");
 
       size_t keys_cnt;
       const ares_dns_rr_key_t *keys = ares_dns_rr_get_keys(ares_dns_rr_get_type(rr), &keys_cnt);
       for (size_t k = 0; k<keys_cnt; k++) {
         char buf[256] = "";
-        ares__buf_append_str(printmsg, ares_dns_rr_key_tostr(keys[k]));
-        ares__buf_append_str(printmsg, "=");
+        ares_buf_append_str(printmsg, ares_dns_rr_key_tostr(keys[k]));
+        ares_buf_append_str(printmsg, "=");
         switch (ares_dns_rr_key_datatype(keys[k])) {
           case ARES_DATATYPE_INADDR:
             ares_inet_ntop(AF_INET, ares_dns_rr_get_addr(rr, keys[k]), buf, sizeof(buf));
-            ares__buf_append_str(printmsg, buf);
+            ares_buf_append_str(printmsg, buf);
             break;
           case ARES_DATATYPE_INADDR6:
             ares_inet_ntop(AF_INET6, ares_dns_rr_get_addr6(rr, keys[k]), buf, sizeof(buf));
-            ares__buf_append_str(printmsg, buf);
+            ares_buf_append_str(printmsg, buf);
             break;
           case ARES_DATATYPE_U8:
-            ares__buf_append_num_dec(printmsg, ares_dns_rr_get_u8(rr, keys[k]), 0);
+            ares_buf_append_num_dec(printmsg, ares_dns_rr_get_u8(rr, keys[k]), 0);
             break;
           case ARES_DATATYPE_U16:
-            ares__buf_append_num_dec(printmsg, ares_dns_rr_get_u16(rr, keys[k]), 0);
+            ares_buf_append_num_dec(printmsg, ares_dns_rr_get_u16(rr, keys[k]), 0);
             break;
           case ARES_DATATYPE_U32:
-            ares__buf_append_num_dec(printmsg, ares_dns_rr_get_u32(rr, keys[k]), 0);
+            ares_buf_append_num_dec(printmsg, ares_dns_rr_get_u32(rr, keys[k]), 0);
             break;
           case ARES_DATATYPE_NAME:
           case ARES_DATATYPE_STR:
-            ares__buf_append_byte(printmsg, '"');
-            ares__buf_append_str(printmsg, ares_dns_rr_get_str(rr, keys[k]));
-            ares__buf_append_byte(printmsg, '"');
+            ares_buf_append_byte(printmsg, '"');
+            ares_buf_append_str(printmsg, ares_dns_rr_get_str(rr, keys[k]));
+            ares_buf_append_byte(printmsg, '"');
             break;
           case ARES_DATATYPE_BIN:
             /* TODO */
             break;
           case ARES_DATATYPE_BINP:
-            ares__buf_append_byte(printmsg, '"');
-            size_t templen;
-            ares__buf_append_str(printmsg, (const char *)ares_dns_rr_get_bin(rr, keys[k], &templen));
-            ares__buf_append_byte(printmsg, '"');
+            {
+              ares_buf_append_byte(printmsg, '"');
+              size_t templen;
+              ares_buf_append_str(printmsg, (const char *)ares_dns_rr_get_bin(rr, keys[k], &templen));
+              ares_buf_append_byte(printmsg, '"');
+            }
+            break;
+          case ARES_DATATYPE_ABINP:
+            for (size_t a=0; a<ares_dns_rr_get_abin_cnt(rr, keys[k]); a++) {
+              if (a != 0) {
+                ares_buf_append_byte(printmsg, ' ');
+              }
+              ares_buf_append_byte(printmsg, '"');
+              size_t templen;
+              ares_buf_append_str(printmsg, (const char *)ares_dns_rr_get_abin(rr, keys[k], a, &templen));
+              ares_buf_append_byte(printmsg, '"');
+            }
             break;
           case ARES_DATATYPE_OPT:
             /* TODO */
             break;
         }
-        ares__buf_append_str(printmsg, " ");
+        ares_buf_append_str(printmsg, " ");
       }
-      ares__buf_append_str(printmsg, "\n");
+      ares_buf_append_str(printmsg, "\n");
     }
   }
-  ares__buf_append_str(printmsg, ";; SIZE: ");
-  ares__buf_append_num_dec(printmsg, msglen, 0);
-  ares__buf_append_str(printmsg, "\n\n");
+  ares_buf_append_str(printmsg, ";; SIZE: ");
+  ares_buf_append_num_dec(printmsg, msglen, 0);
+  ares_buf_append_str(printmsg, "\n\n");
 
-  char *printdata = ares__buf_finish_str(printmsg, NULL);
+  char *printdata = ares_buf_finish_str(printmsg, NULL);
   //printf("%s", printdata);
   ares_free(printdata);
 
   ares_dns_record_destroy(dnsrec);
-  ares_free(msg);
+  ares_free_string(msg);
+
+  // Invalid
+  EXPECT_NE(ARES_SUCCESS, ares_dns_parse(NULL, 0, 0, NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_dns_record_create(NULL, 0, 0, ARES_OPCODE_QUERY, ARES_RCODE_NOERROR));
+  EXPECT_EQ(0, ares_dns_record_get_id(NULL));
+  EXPECT_EQ(0, ares_dns_record_get_flags(NULL));
+  EXPECT_EQ(0, (int)ares_dns_record_get_opcode(NULL));
+  EXPECT_EQ(0, (int)ares_dns_record_get_rcode(NULL));
+  EXPECT_EQ(0, (int)ares_dns_record_query_cnt(NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_dns_record_query_set_name(NULL, 0, NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_dns_record_query_set_type(NULL, 0, ARES_REC_TYPE_A));
+  EXPECT_NE(ARES_SUCCESS, ares_dns_record_query_get(NULL, 0, NULL, NULL, NULL));
+  EXPECT_EQ(0, ares_dns_record_rr_cnt(NULL, ARES_SECTION_ANSWER));
+  EXPECT_NE(ARES_SUCCESS, ares_dns_record_rr_add(NULL, NULL, ARES_SECTION_ANSWER, NULL, ARES_REC_TYPE_A, ARES_CLASS_IN, 0));
+  EXPECT_NE(ARES_SUCCESS, ares_dns_record_rr_del(NULL, ARES_SECTION_ANSWER, 0));
+  EXPECT_EQ(nullptr, ares_dns_record_rr_get(NULL, ARES_SECTION_ANSWER, 0));
+  EXPECT_EQ(nullptr, ares_dns_rr_get_name(NULL));
+  EXPECT_EQ(0, (int)ares_dns_rr_get_type(NULL));
+  EXPECT_EQ(0, (int)ares_dns_rr_get_class(NULL));
+  EXPECT_EQ(0, ares_dns_rr_get_ttl(NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_dns_write(NULL, NULL, NULL));
+#ifndef CARES_SYMBOL_HIDING
+  ares_dns_record_ttl_decrement(NULL, 0);
+#endif
+  EXPECT_EQ(nullptr, ares_dns_rr_get_addr(NULL, ARES_RR_A_ADDR));
+  EXPECT_EQ(nullptr, ares_dns_rr_get_addr(NULL, ARES_RR_NS_NSDNAME));
+  EXPECT_EQ(nullptr, ares_dns_rr_get_addr6(NULL, ARES_RR_AAAA_ADDR));
+  EXPECT_EQ(nullptr, ares_dns_rr_get_addr6(NULL, ARES_RR_NS_NSDNAME));
+  EXPECT_EQ(0, ares_dns_rr_get_u8(NULL, ARES_RR_SIG_ALGORITHM));
+  EXPECT_EQ(0, ares_dns_rr_get_u8(NULL, ARES_RR_NS_NSDNAME));
+  EXPECT_EQ(0, ares_dns_rr_get_u16(NULL, ARES_RR_MX_PREFERENCE));
+  EXPECT_EQ(0, ares_dns_rr_get_u16(NULL, ARES_RR_NS_NSDNAME));
+  EXPECT_EQ(0, ares_dns_rr_get_u32(NULL, ARES_RR_SOA_SERIAL));
+  EXPECT_EQ(0, ares_dns_rr_get_u32(NULL, ARES_RR_NS_NSDNAME));
+  EXPECT_EQ(nullptr, ares_dns_rr_get_bin(NULL, ARES_RR_TXT_DATA, NULL));
+  EXPECT_EQ(nullptr, ares_dns_rr_get_bin(NULL, ARES_RR_NS_NSDNAME, NULL));
+  EXPECT_EQ(nullptr, ares_dns_rr_get_str(NULL, ARES_RR_NS_NSDNAME));
+  EXPECT_EQ(nullptr, ares_dns_rr_get_str(NULL, ARES_RR_MX_PREFERENCE));
+  EXPECT_EQ(0, ares_dns_rr_get_opt_cnt(NULL, ARES_RR_OPT_OPTIONS));
+  EXPECT_EQ(0, ares_dns_rr_get_opt_cnt(NULL, ARES_RR_A_ADDR));
+  EXPECT_EQ(65535, ares_dns_rr_get_opt(NULL, ARES_RR_OPT_OPTIONS, 0, NULL, NULL));
+  EXPECT_EQ(65535, ares_dns_rr_get_opt(NULL, ARES_RR_A_ADDR, 0, NULL, NULL));
+  EXPECT_EQ(ARES_FALSE, ares_dns_rr_get_opt_byid(NULL, ARES_RR_OPT_OPTIONS, 1, NULL, NULL));
+  EXPECT_EQ(ARES_FALSE, ares_dns_rr_get_opt_byid(NULL, ARES_RR_A_ADDR, 1, NULL, NULL));
 }
 
 TEST_F(LibraryTest, DNSParseFlags) {
@@ -839,7 +1104,7 @@ TEST_F(LibraryTest, DNSParseFlags) {
   EXPECT_EQ(ARES_SUCCESS,
     ares_dns_record_rr_add(&rr, dnsrec, ARES_SECTION_ANSWER, "example.com",
       ARES_REC_TYPE_A, ARES_CLASS_IN, 300));
-  EXPECT_LT(0, ares_inet_net_pton(AF_INET, "1.1.1.1", &addr, sizeof(addr)));
+  EXPECT_LT(0, ares_inet_pton(AF_INET, "1.1.1.1", &addr));
   EXPECT_EQ(ARES_SUCCESS,
     ares_dns_rr_set_addr(rr, ARES_RR_A_ADDR, &addr));
   /* TLSA */
@@ -929,116 +1194,594 @@ TEST_F(LibraryTest, DNSParseFlags) {
   EXPECT_EQ(ARES_REC_TYPE_PTR, ares_dns_rr_get_type(rr));
 
   ares_dns_record_destroy(dnsrec);
-  ares_free(msg); msg = NULL;
+  ares_free_string(msg); msg = NULL;
 }
 
-TEST_F(LibraryTest, CatDomain) {
-  char *s;
-
-  ares__cat_domain("foo", "example.net", &s);
-  EXPECT_STREQ("foo.example.net", s);
-  ares_free(s);
-
-  ares__cat_domain("foo", ".", &s);
-  EXPECT_STREQ("foo.", s);
-  ares_free(s);
-
-  ares__cat_domain("foo", "example.net.", &s);
-  EXPECT_STREQ("foo.example.net.", s);
-  ares_free(s);
+TEST_F(LibraryTest, ArrayMisuse) {
+  EXPECT_EQ(NULL, ares_array_create(0, NULL));
+  ares_array_destroy(NULL);
+  EXPECT_EQ(NULL, ares_array_finish(NULL, NULL));
+  EXPECT_EQ(0, ares_array_len(NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_array_insert_at(NULL, NULL, 0));
+  EXPECT_NE(ARES_SUCCESS, ares_array_insertdata_at(NULL, 0, NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_array_insert_last(NULL, NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_array_insertdata_last(NULL, NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_array_insert_first(NULL, NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_array_insertdata_first(NULL, NULL));
+  EXPECT_EQ(NULL, ares_array_at(NULL, 0));
+  EXPECT_EQ(NULL, ares_array_first(NULL));
+  EXPECT_EQ(NULL, ares_array_last(NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_array_claim_at(NULL, 0, NULL, 0));
+  EXPECT_NE(ARES_SUCCESS, ares_array_remove_at(NULL, 0));
+  EXPECT_NE(ARES_SUCCESS, ares_array_remove_first(NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_array_remove_last(NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_array_sort(NULL, NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_array_set_size(NULL, 0));
 }
 
 TEST_F(LibraryTest, BufMisuse) {
-  EXPECT_EQ(NULL, ares__buf_create_const(NULL, 0));
-  ares__buf_reclaim(NULL);
-  EXPECT_NE(ARES_SUCCESS, ares__buf_append(NULL, NULL, 0));
+  EXPECT_EQ(NULL, ares_buf_create_const(NULL, 0));
+  ares_buf_reclaim(NULL);
+  EXPECT_NE(ARES_SUCCESS, ares_buf_append(NULL, NULL, 55));
   size_t len = 10;
-  EXPECT_EQ(NULL, ares__buf_append_start(NULL, &len));
-  EXPECT_EQ(NULL, ares__buf_append_start(NULL, NULL));
-  ares__buf_append_finish(NULL, 0);
-  EXPECT_EQ(NULL, ares__buf_finish_bin(NULL, NULL));
-  EXPECT_EQ(NULL, ares__buf_finish_str(NULL, NULL));
-  ares__buf_tag(NULL);
-  EXPECT_NE(ARES_SUCCESS, ares__buf_tag_rollback(NULL));
-  EXPECT_NE(ARES_SUCCESS, ares__buf_tag_clear(NULL));
-  EXPECT_EQ(NULL, ares__buf_tag_fetch(NULL, NULL));
-  EXPECT_EQ((size_t)0, ares__buf_tag_length(NULL));
-  EXPECT_NE(ARES_SUCCESS, ares__buf_tag_fetch_bytes(NULL, NULL, NULL));
-  EXPECT_NE(ARES_SUCCESS, ares__buf_tag_fetch_string(NULL, NULL, 0));
-  EXPECT_NE(ARES_SUCCESS, ares__buf_fetch_bytes_dup(NULL, 0, ARES_FALSE, NULL));
-  EXPECT_NE(ARES_SUCCESS, ares__buf_fetch_str_dup(NULL, 0, NULL));
-  EXPECT_EQ((size_t)0, ares__buf_consume_whitespace(NULL, ARES_FALSE));
-  EXPECT_EQ((size_t)0, ares__buf_consume_nonwhitespace(NULL));
-  EXPECT_EQ((size_t)0, ares__buf_consume_line(NULL, ARES_FALSE));
-  EXPECT_EQ(ARES_FALSE, ares__buf_begins_with(NULL, NULL, 0));
-  EXPECT_EQ((size_t)0, ares__buf_get_position(NULL));
-  EXPECT_NE(ARES_SUCCESS, ares__buf_set_position(NULL, 0));
-  EXPECT_NE(ARES_SUCCESS, ares__dns_name_parse(NULL, NULL, ARES_FALSE));
-  EXPECT_NE(ARES_SUCCESS, ares__buf_parse_dns_binstr(NULL, 0, NULL, NULL, ARES_FALSE));
-}
-
-TEST_F(LibraryTest, HtableMisuse) {
-  EXPECT_EQ(NULL, ares__htable_create(NULL, NULL, NULL, NULL));
-  EXPECT_EQ(ARES_FALSE, ares__htable_insert(NULL, NULL));
-  EXPECT_EQ(NULL, ares__htable_get(NULL, NULL));
-  EXPECT_EQ(ARES_FALSE, ares__htable_remove(NULL, NULL));
-  EXPECT_EQ((size_t)0, ares__htable_num_keys(NULL));
+  EXPECT_EQ(NULL, ares_buf_append_start(NULL, &len));
+  EXPECT_EQ(NULL, ares_buf_append_start(NULL, NULL));
+  ares_buf_append_finish(NULL, 0);
+  EXPECT_EQ(NULL, ares_buf_finish_bin(NULL, NULL));
+  EXPECT_EQ(NULL, ares_buf_finish_str(NULL, NULL));
+  ares_buf_tag(NULL);
+  EXPECT_NE(ARES_SUCCESS, ares_buf_tag_rollback(NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_buf_tag_clear(NULL));
+  EXPECT_EQ(NULL, ares_buf_tag_fetch(NULL, NULL));
+  EXPECT_EQ((size_t)0, ares_buf_tag_length(NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_buf_tag_fetch_bytes(NULL, NULL, NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_buf_tag_fetch_string(NULL, NULL, 0));
+  EXPECT_NE(ARES_SUCCESS, ares_buf_fetch_bytes_dup(NULL, 0, ARES_FALSE, NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_buf_fetch_str_dup(NULL, 0, NULL));
+  EXPECT_EQ((size_t)0, ares_buf_consume_whitespace(NULL, ARES_FALSE));
+  EXPECT_EQ((size_t)0, ares_buf_consume_nonwhitespace(NULL));
+  EXPECT_EQ((size_t)0, ares_buf_consume_line(NULL, ARES_FALSE));
+  EXPECT_EQ(ARES_FALSE, ares_buf_begins_with(NULL, NULL, 0));
+  EXPECT_EQ((size_t)0, ares_buf_get_position(NULL));
+  EXPECT_NE(ARES_SUCCESS, ares_buf_set_position(NULL, 0));
+  EXPECT_NE(ARES_SUCCESS, ares_buf_parse_dns_binstr(NULL, 0, NULL, NULL));
 }
 
 TEST_F(LibraryTest, HtableAsvpMisuse) {
-  EXPECT_EQ(ARES_FALSE, ares__htable_asvp_insert(NULL, ARES_SOCKET_BAD, NULL));
-  EXPECT_EQ(ARES_FALSE, ares__htable_asvp_get(NULL, ARES_SOCKET_BAD, NULL));
-  EXPECT_EQ(ARES_FALSE, ares__htable_asvp_remove(NULL, ARES_SOCKET_BAD));
-  EXPECT_EQ((size_t)0, ares__htable_asvp_num_keys(NULL));
+  EXPECT_EQ(ARES_FALSE, ares_htable_asvp_insert(NULL, ARES_SOCKET_BAD, NULL));
+  EXPECT_EQ(ARES_FALSE, ares_htable_asvp_get(NULL, ARES_SOCKET_BAD, NULL));
+  EXPECT_EQ(ARES_FALSE, ares_htable_asvp_remove(NULL, ARES_SOCKET_BAD));
+  EXPECT_EQ((size_t)0, ares_htable_asvp_num_keys(NULL));
 }
 
 TEST_F(LibraryTest, HtableStrvpMisuse) {
-  EXPECT_EQ(ARES_FALSE, ares__htable_strvp_insert(NULL, NULL, NULL));
-  EXPECT_EQ(ARES_FALSE, ares__htable_strvp_get(NULL, NULL, NULL));
-  EXPECT_EQ(ARES_FALSE, ares__htable_strvp_remove(NULL, NULL));
-  EXPECT_EQ((size_t)0, ares__htable_strvp_num_keys(NULL));
+  EXPECT_EQ(ARES_FALSE, ares_htable_strvp_insert(NULL, NULL, NULL));
+  EXPECT_EQ(ARES_FALSE, ares_htable_strvp_get(NULL, NULL, NULL));
+  EXPECT_EQ(ARES_FALSE, ares_htable_strvp_remove(NULL, NULL));
+  EXPECT_EQ((size_t)0, ares_htable_strvp_num_keys(NULL));
+}
+
+TEST_F(LibraryTest, HtableVpStrMisuse) {
+  EXPECT_EQ(ARES_FALSE, ares_htable_vpstr_insert(NULL, NULL, NULL));
+  EXPECT_EQ(ARES_FALSE, ares_htable_vpstr_get(NULL, NULL, NULL));
+  EXPECT_EQ(ARES_FALSE, ares_htable_vpstr_remove(NULL, NULL));
+  EXPECT_EQ((size_t)0, ares_htable_vpstr_num_keys(NULL));
+}
+
+TEST_F(LibraryTest, HtableDictMisuse) {
+  EXPECT_EQ(ARES_FALSE, ares_htable_dict_insert(NULL, NULL, NULL));
+  EXPECT_EQ(ARES_FALSE, ares_htable_dict_get(NULL, NULL, NULL));
+  EXPECT_EQ(ARES_FALSE, ares_htable_dict_remove(NULL, NULL));
+  EXPECT_EQ((size_t)0, ares_htable_dict_num_keys(NULL));
 }
 
 TEST_F(LibraryTest, HtableSzvpMisuse) {
-  EXPECT_EQ(ARES_FALSE, ares__htable_szvp_insert(NULL, 0, NULL));
-  EXPECT_EQ(ARES_FALSE, ares__htable_szvp_get(NULL, 0, NULL));
-  EXPECT_EQ(ARES_FALSE, ares__htable_szvp_remove(NULL, 0));
-  EXPECT_EQ((size_t)0, ares__htable_szvp_num_keys(NULL));
+  EXPECT_EQ(ARES_FALSE, ares_htable_szvp_insert(NULL, 0, NULL));
+  EXPECT_EQ(ARES_FALSE, ares_htable_szvp_get(NULL, 0, NULL));
+  EXPECT_EQ(ARES_FALSE, ares_htable_szvp_remove(NULL, 0));
+  EXPECT_EQ((size_t)0, ares_htable_szvp_num_keys(NULL));
+}
+
+TEST_F(LibraryTest, HtableVpvpMisuse) {
+  EXPECT_EQ(ARES_FALSE, ares_htable_vpvp_insert(NULL, NULL, NULL));
+  EXPECT_EQ(ARES_FALSE, ares_htable_vpvp_get(NULL, NULL, NULL));
+  EXPECT_EQ(ARES_FALSE, ares_htable_vpvp_remove(NULL, NULL));
+  EXPECT_EQ((size_t)0, ares_htable_vpvp_num_keys(NULL));
 }
 
 TEST_F(LibraryTest, LlistMisuse) {
-  ares__llist_replace_destructor(NULL, NULL);
-  EXPECT_EQ(NULL, ares__llist_insert_before(NULL, NULL));
-  EXPECT_EQ(NULL, ares__llist_insert_after(NULL, NULL));
-  EXPECT_EQ(NULL, ares__llist_node_last(NULL));
-  EXPECT_EQ(NULL, ares__llist_node_next(NULL));
-  EXPECT_EQ(NULL, ares__llist_node_prev(NULL));
-  EXPECT_EQ((size_t)0, ares__llist_len(NULL));
-  EXPECT_EQ(NULL, ares__llist_node_parent(NULL));
-  EXPECT_EQ(NULL, ares__llist_node_claim(NULL));
-  ares__llist_node_replace(NULL, NULL);
+  ares_llist_replace_destructor(NULL, NULL);
+  EXPECT_EQ(NULL, ares_llist_insert_before(NULL, NULL));
+  EXPECT_EQ(NULL, ares_llist_insert_after(NULL, NULL));
+  EXPECT_EQ(NULL, ares_llist_node_last(NULL));
+  EXPECT_EQ(NULL, ares_llist_node_next(NULL));
+  EXPECT_EQ(NULL, ares_llist_node_prev(NULL));
+  EXPECT_EQ((size_t)0, ares_llist_len(NULL));
+  EXPECT_EQ(NULL, ares_llist_node_parent(NULL));
+  EXPECT_EQ(NULL, ares_llist_node_claim(NULL));
+  ares_llist_node_replace(NULL, NULL);
 }
 
-TEST_F(LibraryTest, SlistMisuse) {
-  EXPECT_EQ(NULL, ares__slist_create(NULL, NULL, NULL));
-  ares__slist_replace_destructor(NULL, NULL);
-  EXPECT_EQ(NULL, ares__slist_insert(NULL, NULL));
-  EXPECT_EQ(NULL, ares__slist_node_find(NULL, NULL));
-  EXPECT_EQ(NULL, ares__slist_node_first(NULL));
-  EXPECT_EQ(NULL, ares__slist_node_last(NULL));
-  EXPECT_EQ(NULL, ares__slist_node_next(NULL));
-  EXPECT_EQ(NULL, ares__slist_node_prev(NULL));
-  EXPECT_EQ(NULL, ares__slist_node_val(NULL));
-  EXPECT_EQ((size_t)0, ares__slist_len(NULL));
-  EXPECT_EQ(NULL, ares__slist_node_parent(NULL));
-  EXPECT_EQ(NULL, ares__slist_first_val(NULL));
-  EXPECT_EQ(NULL, ares__slist_last_val(NULL));
-  EXPECT_EQ(NULL, ares__slist_node_claim(NULL));
+typedef struct {
+  unsigned int id;
+  ares_buf_t *buf;
+} array_member_t;
+
+static void array_member_init(void *mb, unsigned int id)
+{
+  array_member_t *m = (array_member_t *)mb;
+  m->id             = id;
+  m->buf            = ares_buf_create();
+  ares_buf_append_be32(m->buf, id);
 }
-#endif
+
+static void array_member_destroy(void *mb)
+{
+  array_member_t *m = (array_member_t *)mb;
+  ares_buf_destroy(m->buf);
+}
+
+static int array_sort_cmp(const void *data1, const void *data2)
+{
+  const array_member_t *m1 = (const array_member_t *)data1;
+  const array_member_t *m2 = (const array_member_t *)data2;
+  if (m1->id > m2->id)
+    return 1;
+  if (m1->id < m2->id)
+    return -1;
+  return 0;
+}
+
+TEST_F(LibraryTest, Array) {
+  ares_array_t   *a       = NULL;
+  array_member_t *m       = NULL;
+  array_member_t  mbuf;
+  unsigned int    cnt     = 0;
+  unsigned int    removed = 0;
+  void           *ptr     = NULL;
+  size_t          i;
+
+  a = ares_array_create(sizeof(array_member_t), array_member_destroy);
+  EXPECT_NE(nullptr, a);
+
+  /* Try to sort with no elements, should break out */
+  EXPECT_EQ(ARES_SUCCESS, ares_array_sort(a, array_sort_cmp));
+
+  /* Add 8 elements */
+  for ( ; cnt < 8 ; cnt++) {
+    EXPECT_EQ(ARES_SUCCESS, ares_array_insert_last(&ptr, a));
+    array_member_init(ptr, cnt+1);
+  }
+
+  /* Insert at invalid index */
+  EXPECT_NE(ARES_SUCCESS, ares_array_insert_at(&ptr, a, 12345678));
+
+  /* Verify count */
+  EXPECT_EQ(cnt, ares_array_len(a));
+
+  /* Remove the first 2 elements */
+  EXPECT_EQ(ARES_SUCCESS, ares_array_remove_first(a));
+  EXPECT_EQ(ARES_SUCCESS, ares_array_remove_first(a));
+  removed += 2;
+
+  /* Verify count */
+  EXPECT_EQ(cnt-removed, ares_array_len(a));
+
+  /* Verify id of first element */
+  m = (array_member_t *)ares_array_first(a);
+  EXPECT_NE(nullptr, m);
+  EXPECT_EQ(3, m->id);
+
+
+  /* Add 100 total elements, this should force a shift of memory at some
+   * to make sure moves are working */
+  for ( ; cnt < 100 ; cnt++) {
+    EXPECT_EQ(ARES_SUCCESS, ares_array_insert_last(&ptr, a));
+    array_member_init(ptr, cnt+1);
+  }
+
+  /* Verify count */
+  EXPECT_EQ(cnt-removed, ares_array_len(a));
+
+  /* Remove 2 from the end */
+  EXPECT_EQ(ARES_SUCCESS, ares_array_remove_last(a));
+  EXPECT_EQ(ARES_SUCCESS, ares_array_remove_last(a));
+  removed += 2;
+
+  /* Verify count */
+  EXPECT_EQ(cnt-removed, ares_array_len(a));
+
+  /* Verify expected id of last member */
+  m = (array_member_t *)ares_array_last(a);
+  EXPECT_NE(nullptr, m);
+  EXPECT_EQ(cnt-2, m->id);
+
+  /* Remove 3 middle members */
+  EXPECT_EQ(ARES_SUCCESS, ares_array_remove_at(a, ares_array_len(a)/2));
+  EXPECT_EQ(ARES_SUCCESS, ares_array_remove_at(a, ares_array_len(a)/2));
+  EXPECT_EQ(ARES_SUCCESS, ares_array_remove_at(a, ares_array_len(a)/2));
+  removed += 3;
+
+  /* Verify count */
+  EXPECT_EQ(cnt-removed, ares_array_len(a));
+
+  /* Claim a middle member then re-add it at the same position */
+  i = ares_array_len(a) / 2;
+  EXPECT_EQ(ARES_SUCCESS, ares_array_claim_at(&mbuf, sizeof(mbuf), a, i));
+  EXPECT_EQ(ARES_SUCCESS, ares_array_insert_at(&ptr, a, i));
+  array_member_init(ptr, mbuf.id);
+  array_member_destroy((void *)&mbuf);
+  /* Verify count */
+  EXPECT_EQ(cnt-removed, ares_array_len(a));
+
+  /* Iterate across the array, make sure each entry is greater than the last and
+   * the data in the buffer matches the id in the array */
+  unsigned int last_id = 0;
+  for (i=0; i<ares_array_len(a); i++) {
+    m = (array_member_t *)ares_array_at(a, i);
+    EXPECT_NE(nullptr, m);
+    EXPECT_GT(m->id, last_id);
+    last_id = m->id;
+
+    unsigned int bufval = 0;
+    ares_buf_tag(m->buf);
+    EXPECT_EQ(ARES_SUCCESS, ares_buf_fetch_be32(m->buf, &bufval));
+    ares_buf_tag_rollback(m->buf);
+    EXPECT_EQ(bufval, m->id);
+  }
+
+  /* add a new element in the middle to the beginning with a high id */
+  EXPECT_EQ(ARES_SUCCESS, ares_array_insert_at(&ptr, a, ares_array_len(a)/2));
+  array_member_init(ptr, 100000);
+
+  /* Sort the array */
+  EXPECT_EQ(ARES_SUCCESS, ares_array_sort(a, array_sort_cmp));
+
+  /* Iterate across the array, make sure each entry is greater than the last and
+   * the data in the buffer matches the id in the array */
+  last_id = 0;
+  for (i=0; i<ares_array_len(a); i++) {
+    m = (array_member_t *)ares_array_at(a, i);
+    EXPECT_NE(nullptr, m);
+    EXPECT_GT(m->id, last_id);
+    last_id = m->id;
+
+    unsigned int bufval = 0;
+    ares_buf_tag(m->buf);
+    EXPECT_EQ(ARES_SUCCESS, ares_buf_fetch_be32(m->buf, &bufval));
+    ares_buf_tag_rollback(m->buf);
+    EXPECT_EQ(bufval, m->id);
+  }
+
+  ares_array_destroy(a);
+}
+
+TEST_F(LibraryTest, HtableVpvp) {
+  ares_llist_t       *l = NULL;
+  ares_htable_vpvp_t *h = NULL;
+  ares_llist_node_t  *n = NULL;
+  size_t               i;
+
+#define VPVP_TABLE_SIZE 1000
+
+  l = ares_llist_create(NULL);
+  EXPECT_NE((void *)NULL, l);
+
+  h = ares_htable_vpvp_create(NULL, ares_free);
+  EXPECT_NE((void *)NULL, h);
+
+  for (i=0; i<VPVP_TABLE_SIZE; i++) {
+    void *p = ares_malloc_zero(4);
+    EXPECT_NE((void *)NULL, p);
+    EXPECT_NE((void *)NULL, ares_llist_insert_last(l, p));
+    EXPECT_TRUE(ares_htable_vpvp_insert(h, p, p));
+  }
+
+  EXPECT_EQ(VPVP_TABLE_SIZE, ares_llist_len(l));
+  EXPECT_EQ(VPVP_TABLE_SIZE, ares_htable_vpvp_num_keys(h));
+
+  n = ares_llist_node_first(l);
+  EXPECT_NE((void *)NULL, n);
+  while (n != NULL) {
+    ares_llist_node_t *next = ares_llist_node_next(n);
+    void               *p    = ares_llist_node_val(n);
+    EXPECT_NE((void *)NULL, p);
+    EXPECT_EQ(p, ares_htable_vpvp_get_direct(h, p));
+    EXPECT_TRUE(ares_htable_vpvp_get(h, p, NULL));
+    EXPECT_TRUE(ares_htable_vpvp_remove(h, p));
+    ares_llist_node_destroy(n);
+    n = next;
+  }
+
+  EXPECT_EQ(0, ares_llist_len(l));
+  EXPECT_EQ(0, ares_htable_vpvp_num_keys(h));
+
+  ares_llist_destroy(l);
+  ares_htable_vpvp_destroy(h);
+}
+
+TEST_F(LibraryTest, BufSplitStr) {
+  ares_buf_t  *buf   = NULL;
+  char        **strs  = NULL;
+  size_t        nstrs = 0;
+
+  buf = ares_buf_create();
+  ares_buf_append_str(buf, "string1\nstring2 string3\t   \nstring4");
+  ares_buf_split_str(buf, (const unsigned char *)"\n \t", 2, ARES_BUF_SPLIT_TRIM, 0, &strs, &nstrs);
+  ares_buf_destroy(buf);
+
+  EXPECT_EQ(4, nstrs);
+  EXPECT_TRUE(ares_streq(strs[0], "string1"));
+  EXPECT_TRUE(ares_streq(strs[1], "string2"));
+  EXPECT_TRUE(ares_streq(strs[2], "string3"));
+  EXPECT_TRUE(ares_streq(strs[3], "string4"));
+  ares_free_array(strs, nstrs, ares_free);
+}
+
+TEST_F(LibraryTest, BufReplace) {
+  ares_buf_t  *buf = NULL;
+  size_t       i;
+  struct {
+    const char *input;
+    const char *srch;
+    const char *rplc;
+    const char *output;
+  } tests[] = {
+    /* Same size */
+    { "nameserver_1.2.3.4\nnameserver_2.3.4.5\n", "_", " ", "nameserver 1.2.3.4\nnameserver 2.3.4.5\n" },
+    /* Longer */
+    { "nameserver_1.2.3.4\nnameserver_2.3.4.5\n", "_", "|||", "nameserver|||1.2.3.4\nnameserver|||2.3.4.5\n" },
+    /* Shorter */
+    { "nameserver_1.2.3.4\nnameserver_2.3.4.5\n", "_", "", "nameserver1.2.3.4\nnameserver2.3.4.5\n" }
+  };
+  char        *str = NULL;
+
+  for (i=0; i<sizeof(tests)/sizeof(*tests); i++) {
+    buf = ares_buf_create();
+    EXPECT_EQ(ARES_SUCCESS, ares_buf_append_str(buf, tests[i].input));
+    EXPECT_EQ(ARES_SUCCESS, ares_buf_replace(buf, (const unsigned char *)tests[i].srch, ares_strlen(tests[i].srch), (const unsigned char *)tests[i].rplc, ares_strlen(tests[i].rplc)));
+    str = ares_buf_finish_str(buf, NULL);
+    EXPECT_STREQ(str, tests[i].output);
+    ares_free(str);
+  }
+}
+
+typedef struct {
+  ares_socket_t s;
+} test_htable_asvp_t;
+
+TEST_F(LibraryTest, HtableAsvp) {
+  ares_llist_t       *l = NULL;
+  ares_htable_asvp_t *h = NULL;
+  ares_llist_node_t  *n = NULL;
+  size_t               i;
+
+#define ASVP_TABLE_SIZE 1000
+
+  l = ares_llist_create(NULL);
+  EXPECT_NE((void *)NULL, l);
+
+  h = ares_htable_asvp_create(ares_free);
+  EXPECT_NE((void *)NULL, h);
+
+  for (i=0; i<ASVP_TABLE_SIZE; i++) {
+    test_htable_asvp_t *a = (test_htable_asvp_t *)ares_malloc_zero(sizeof(*a));
+    EXPECT_NE((void *)NULL, a);
+    a->s = (ares_socket_t)i+1;
+    EXPECT_NE((void *)NULL, ares_llist_insert_last(l, a));
+    EXPECT_TRUE(ares_htable_asvp_insert(h, a->s, a));
+  }
+
+  EXPECT_EQ(ASVP_TABLE_SIZE, ares_llist_len(l));
+  EXPECT_EQ(ASVP_TABLE_SIZE, ares_htable_asvp_num_keys(h));
+
+  n = ares_llist_node_first(l);
+  EXPECT_NE((void *)NULL, n);
+  while (n != NULL) {
+    ares_llist_node_t *next = ares_llist_node_next(n);
+    test_htable_asvp_t *a    = (test_htable_asvp_t *)ares_llist_node_val(n);
+    EXPECT_NE((void *)NULL, a);
+    EXPECT_EQ(a, ares_htable_asvp_get_direct(h, a->s));
+    EXPECT_TRUE(ares_htable_asvp_get(h, a->s, NULL));
+    EXPECT_TRUE(ares_htable_asvp_remove(h, a->s));
+    ares_llist_node_destroy(n);
+    n = next;
+  }
+
+  EXPECT_EQ(0, ares_llist_len(l));
+  EXPECT_EQ(0, ares_htable_asvp_num_keys(h));
+
+  ares_llist_destroy(l);
+  ares_htable_asvp_destroy(h);
+}
+
+
+typedef struct {
+  size_t s;
+} test_htable_szvp_t;
+
+TEST_F(LibraryTest, HtableSzvp) {
+  ares_llist_t       *l = NULL;
+  ares_htable_szvp_t *h = NULL;
+  ares_llist_node_t  *n = NULL;
+  size_t               i;
+
+#define SZVP_TABLE_SIZE 1000
+
+  l = ares_llist_create(NULL);
+  EXPECT_NE((void *)NULL, l);
+
+  h = ares_htable_szvp_create(ares_free);
+  EXPECT_NE((void *)NULL, h);
+
+  for (i=0; i<SZVP_TABLE_SIZE; i++) {
+    test_htable_szvp_t *s = (test_htable_szvp_t *)ares_malloc_zero(sizeof(*s));
+    EXPECT_NE((void *)NULL, s);
+    s->s = i+1;
+    EXPECT_NE((void *)NULL, ares_llist_insert_last(l, s));
+    EXPECT_TRUE(ares_htable_szvp_insert(h, s->s, s));
+  }
+
+  EXPECT_EQ(SZVP_TABLE_SIZE, ares_llist_len(l));
+  EXPECT_EQ(SZVP_TABLE_SIZE, ares_htable_szvp_num_keys(h));
+
+  n = ares_llist_node_first(l);
+  EXPECT_NE((void *)NULL, n);
+  while (n != NULL) {
+    ares_llist_node_t *next = ares_llist_node_next(n);
+    test_htable_szvp_t *s    = (test_htable_szvp_t *)ares_llist_node_val(n);
+    EXPECT_NE((void *)NULL, s);
+    EXPECT_EQ(s, ares_htable_szvp_get_direct(h, s->s));
+    EXPECT_TRUE(ares_htable_szvp_get(h, s->s, NULL));
+    EXPECT_TRUE(ares_htable_szvp_remove(h, s->s));
+    ares_llist_node_destroy(n);
+    n = next;
+  }
+
+  EXPECT_EQ(0, ares_llist_len(l));
+  EXPECT_EQ(0, ares_htable_szvp_num_keys(h));
+
+  ares_llist_destroy(l);
+  ares_htable_szvp_destroy(h);
+}
+
+typedef struct {
+  char s[32];
+} test_htable_vpstr_t;
+
+TEST_F(LibraryTest, HtableVpstr) {
+  ares_llist_t        *l = NULL;
+  ares_htable_vpstr_t *h = NULL;
+  ares_llist_node_t   *n = NULL;
+  size_t                i;
+
+#define VPSTR_TABLE_SIZE 1000
+
+  l = ares_llist_create(ares_free);
+  EXPECT_NE((void *)NULL, l);
+
+  h = ares_htable_vpstr_create();
+  EXPECT_NE((void *)NULL, h);
+
+  for (i=0; i<VPSTR_TABLE_SIZE; i++) {
+    test_htable_vpstr_t *s = (test_htable_vpstr_t *)ares_malloc_zero(sizeof(*s));
+    EXPECT_NE((void *)NULL, s);
+    snprintf(s->s, sizeof(s->s), "%d", (int)i);
+    EXPECT_NE((void *)NULL, ares_llist_insert_last(l, s));
+    EXPECT_TRUE(ares_htable_vpstr_insert(h, s, s->s));
+  }
+
+  EXPECT_EQ(VPSTR_TABLE_SIZE, ares_llist_len(l));
+  EXPECT_EQ(VPSTR_TABLE_SIZE, ares_htable_vpstr_num_keys(h));
+
+  n = ares_llist_node_first(l);
+  EXPECT_NE((void *)NULL, n);
+  while (n != NULL) {
+    ares_llist_node_t *next = ares_llist_node_next(n);
+    test_htable_vpstr_t *s   = (test_htable_vpstr_t *)ares_llist_node_val(n);
+    EXPECT_NE((void *)NULL, s);
+    EXPECT_STREQ(s->s, ares_htable_vpstr_get_direct(h, s));
+    EXPECT_TRUE(ares_htable_vpstr_get(h, s, NULL));
+    EXPECT_TRUE(ares_htable_vpstr_remove(h, s));
+    ares_llist_node_destroy(n);
+    n = next;
+  }
+
+  EXPECT_EQ(0, ares_llist_len(l));
+  EXPECT_EQ(0, ares_htable_vpstr_num_keys(h));
+
+  ares_llist_destroy(l);
+  ares_htable_vpstr_destroy(h);
+}
+
+
+typedef struct {
+  char s[32];
+} test_htable_strvp_t;
+
+TEST_F(LibraryTest, HtableStrvp) {
+  ares_llist_t        *l = NULL;
+  ares_htable_strvp_t *h = NULL;
+  ares_llist_node_t   *n = NULL;
+  size_t                i;
+
+#define STRVP_TABLE_SIZE 1000
+
+  l = ares_llist_create(NULL);
+  EXPECT_NE((void *)NULL, l);
+
+  h = ares_htable_strvp_create(ares_free);
+  EXPECT_NE((void *)NULL, h);
+
+  for (i=0; i<STRVP_TABLE_SIZE; i++) {
+    test_htable_strvp_t *s = (test_htable_strvp_t *)ares_malloc_zero(sizeof(*s));
+    EXPECT_NE((void *)NULL, s);
+    snprintf(s->s, sizeof(s->s), "%d", (int)i);
+    EXPECT_NE((void *)NULL, ares_llist_insert_last(l, s));
+    EXPECT_TRUE(ares_htable_strvp_insert(h, s->s, s));
+  }
+
+  EXPECT_EQ(STRVP_TABLE_SIZE, ares_llist_len(l));
+  EXPECT_EQ(STRVP_TABLE_SIZE, ares_htable_strvp_num_keys(h));
+
+  n = ares_llist_node_first(l);
+  EXPECT_NE((void *)NULL, n);
+  while (n != NULL) {
+    ares_llist_node_t *next = ares_llist_node_next(n);
+    test_htable_strvp_t *s   = (test_htable_strvp_t *)ares_llist_node_val(n);
+    EXPECT_NE((void *)NULL, s);
+    EXPECT_EQ(s, ares_htable_strvp_get_direct(h, s->s));
+    EXPECT_TRUE(ares_htable_strvp_get(h, s->s, NULL));
+    EXPECT_TRUE(ares_htable_strvp_remove(h, s->s));
+    ares_llist_node_destroy(n);
+    n = next;
+  }
+
+  EXPECT_EQ(0, ares_llist_len(l));
+  EXPECT_EQ(0, ares_htable_strvp_num_keys(h));
+
+  ares_llist_destroy(l);
+  ares_htable_strvp_destroy(h);
+}
+
+TEST_F(LibraryTest, HtableDict) {
+  ares_htable_dict_t  *h = NULL;
+  size_t               i;
+  char               **keys;
+  size_t               nkeys;
+
+#define DICT_TABLE_SIZE 1000
+
+  h = ares_htable_dict_create();
+  EXPECT_NE((void *)NULL, h);
+
+  for (i=0; i<DICT_TABLE_SIZE; i++) {
+    char key[32];
+    char val[32];
+    snprintf(key, sizeof(key), "%d", (int)i);
+    snprintf(val, sizeof(val), "val%d", (int)i);
+    EXPECT_TRUE(ares_htable_dict_insert(h, key, val));
+  }
+
+  EXPECT_EQ(DICT_TABLE_SIZE, ares_htable_dict_num_keys(h));
+
+  keys = ares_htable_dict_keys(h, &nkeys);
+  for (i=0; i<nkeys; i++) {
+    char val[32];
+    snprintf(val, sizeof(val), "val%s", keys[i]);
+    EXPECT_STREQ(val, ares_htable_dict_get_direct(h, keys[i]));
+    EXPECT_TRUE(ares_htable_dict_get(h, keys[i], NULL));
+    EXPECT_TRUE(ares_htable_dict_remove(h, keys[i]));
+  }
+  ares_free_array(keys, nkeys, ares_free);
+
+  EXPECT_EQ(0, ares_htable_dict_num_keys(h));
+
+  ares_htable_dict_destroy(h);
+}
 
 TEST_F(DefaultChannelTest, SaveInvalidChannel) {
-  ares__slist_t *saved = channel_->servers;
+  ares_slist_t *saved = channel_->servers;
   channel_->servers = NULL;
   struct ares_options opts;
   int optmask = 0;
